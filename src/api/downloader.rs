@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::bail;
+use bao_tree::Hasher;
 use genawaiter::sync::Gen;
 use iroh::{Endpoint, NodeId};
 use irpc::{channel::mpsc, rpc_requests};
@@ -74,11 +75,11 @@ impl DownloaderActor {
         }
     }
 
-    async fn run(mut self, mut rx: tokio::sync::mpsc::Receiver<SwarmMsg>) {
+    async fn run<H: Hasher + 'static>(mut self, mut rx: tokio::sync::mpsc::Receiver<SwarmMsg>) {
         while let Some(msg) = rx.recv().await {
             match msg {
                 SwarmMsg::Download(request) => {
-                    self.spawn(handle_download(
+                    self.spawn(handle_download::<H>(
                         self.store.clone(),
                         self.pool.clone(),
                         request,
@@ -95,42 +96,42 @@ impl DownloaderActor {
     }
 }
 
-async fn handle_download(store: Store, pool: ConnectionPool, msg: DownloadMsg) {
+async fn handle_download<H: Hasher>(store: Store, pool: ConnectionPool, msg: DownloadMsg) {
     let DownloadMsg { inner, mut tx, .. } = msg;
-    if let Err(cause) = handle_download_impl(store, pool, inner, &mut tx).await {
+    if let Err(cause) = handle_download_impl::<H>(store, pool, inner, &mut tx).await {
         tx.send(DownloadProgessItem::Error(cause)).await.ok();
     }
 }
 
-async fn handle_download_impl(
+async fn handle_download_impl<H: Hasher>(
     store: Store,
     pool: ConnectionPool,
     request: DownloadRequest,
     tx: &mut mpsc::Sender<DownloadProgessItem>,
 ) -> anyhow::Result<()> {
     match request.strategy {
-        SplitStrategy::Split => handle_download_split_impl(store, pool, request, tx).await?,
+        SplitStrategy::Split => handle_download_split_impl::<H>(store, pool, request, tx).await?,
         SplitStrategy::None => match request.request {
             FiniteRequest::Get(get) => {
                 let sink = IrpcSenderRefSink(tx);
-                execute_get(&pool, Arc::new(get), &request.providers, &store, sink).await?;
+                execute_get::<H>(&pool, Arc::new(get), &request.providers, &store, sink).await?;
             }
             FiniteRequest::GetMany(_) => {
-                handle_download_split_impl(store, pool, request, tx).await?
+                handle_download_split_impl::<H>(store, pool, request, tx).await?
             }
         },
     }
     Ok(())
 }
 
-async fn handle_download_split_impl(
+async fn handle_download_split_impl<H: Hasher>(
     store: Store,
     pool: ConnectionPool,
     request: DownloadRequest,
     tx: &mut mpsc::Sender<DownloadProgessItem>,
 ) -> anyhow::Result<()> {
     let providers = request.providers;
-    let requests = split_request(&request.request, &providers, &pool, &store, Drain).await?;
+    let requests = split_request::<H>(&request.request, &providers, &pool, &store, Drain).await?;
     let (progress_tx, progress_rx) = tokio::sync::mpsc::channel(32);
     let mut futs = stream::iter(requests.into_iter().enumerate())
         .map(|(id, request)| {
@@ -143,7 +144,7 @@ async fn handle_download_split_impl(
                 let (tx, rx) = tokio::sync::mpsc::channel::<(usize, DownloadProgessItem)>(16);
                 progress_tx.send(rx).await.ok();
                 let sink = TokioMpscSenderSink(tx).with_map(move |x| (id, x));
-                let res = execute_get(&pool, Arc::new(request), &providers, &store, sink).await;
+                let res = execute_get::<H>(&pool, Arc::new(request), &providers, &store, sink).await;
                 (hash, res)
             }
         })
@@ -339,10 +340,10 @@ impl IntoFuture for DownloadProgress {
 }
 
 impl Downloader {
-    pub fn new(store: &Store, endpoint: &Endpoint) -> Self {
+    pub fn new<H: Hasher + 'static>(store: &Store, endpoint: &Endpoint) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel::<SwarmMsg>(32);
         let actor = DownloaderActor::new(store.clone(), endpoint.clone());
-        tokio::spawn(actor.run(rx));
+        tokio::spawn(actor.run::<H>(rx));
         Self { client: tx.into() }
     }
 
@@ -367,7 +368,7 @@ impl Downloader {
 }
 
 /// Split a request into multiple requests that can be run in parallel.
-async fn split_request<'a>(
+async fn split_request<'a, H: Hasher>(
     request: &'a FiniteRequest,
     providers: &Arc<dyn ContentDiscovery>,
     pool: &ConnectionPool,
@@ -380,7 +381,7 @@ async fn split_request<'a>(
                 return Ok(Box::new(std::iter::empty()));
             };
             let first = GetRequest::blob(req.hash);
-            execute_get(pool, Arc::new(first), providers, store, progress).await?;
+            execute_get::<H>(pool, Arc::new(first), providers, store, progress).await?;
             let size = store.observe(req.hash).await?.size();
             anyhow::ensure!(size % 32 == 0, "Size is not a multiple of 32");
             let n = size / 32;
@@ -423,7 +424,7 @@ async fn split_request<'a>(
 ///
 /// If the request is not complete after trying all providers, it will return an error.
 /// If the provider stream never ends, it will try indefinitely.
-async fn execute_get(
+async fn execute_get<H: Hasher>(
     pool: &ConnectionPool,
     request: Arc<GetRequest>,
     providers: &Arc<dyn ContentDiscovery>,
@@ -455,7 +456,7 @@ async fn execute_get(
             continue;
         };
         match remote
-            .execute_get_sink(
+            .execute_get_sink::<H>(
                 &conn,
                 local.missing(),
                 (&mut progress).with_map(move |x| DownloadProgessItem::Progress(x + local_bytes)),

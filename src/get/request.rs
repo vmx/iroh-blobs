@@ -13,7 +13,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use bao_tree::{io::BaoContentItem, ChunkNum, ChunkRanges};
+use bao_tree::{io::BaoContentItem, ChunkNum, ChunkRanges, Hasher};
 use bytes::Bytes;
 use genawaiter::sync::{Co, Gen};
 use iroh::endpoint::Connection;
@@ -107,9 +107,9 @@ pub enum GetBlobItem {
     Error(GetError),
 }
 
-pub fn get_blob(connection: Connection, hash: Hash) -> GetBlobResult {
+pub fn get_blob<H: Hasher>(connection: Connection, hash: Hash) -> GetBlobResult {
     let generator = Gen::new(|co| async move {
-        if let Err(cause) = get_blob_impl(&connection, &hash, &co).await {
+        if let Err(cause) = get_blob_impl::<H>(&connection, &hash, &co).await {
             co.yield_(GetBlobItem::Error(cause)).await;
         }
     });
@@ -118,7 +118,7 @@ pub fn get_blob(connection: Connection, hash: Hash) -> GetBlobResult {
     }
 }
 
-async fn get_blob_impl(
+async fn get_blob_impl<H: Hasher>(
     connection: &Connection,
     hash: &Hash,
     co: &Co<GetBlobItem>,
@@ -132,7 +132,7 @@ async fn get_blob_impl(
     let header = start.next();
     let (mut curr, _size) = header.next().await?;
     let end = loop {
-        match curr.next().await {
+        match curr.next::<H>().await {
             fsm::BlobContentNext::More((next, res)) => {
                 co.yield_(res?.into()).await;
                 curr = next;
@@ -174,7 +174,7 @@ pub async fn get_unverified_size(connection: &Connection, hash: &Hash) -> GetRes
 ///
 /// This asks for the last chunk of the blob and validates the response.
 /// Note that this does not validate that the peer has all the data.
-pub async fn get_verified_size(connection: &Connection, hash: &Hash) -> GetResult<(u64, Stats)> {
+pub async fn get_verified_size<H: Hasher>(connection: &Connection, hash: &Hash) -> GetResult<(u64, Stats)> {
     tracing::trace!("Getting verified size of {}", hash.to_hex());
     let request = GetRequest::new(
         *hash,
@@ -188,7 +188,7 @@ pub async fn get_verified_size(connection: &Connection, hash: &Hash) -> GetResul
     let header = start.next();
     let (mut curr, size) = header.next().await?;
     let end = loop {
-        match curr.next().await {
+        match curr.next::<H>().await {
             fsm::BlobContentNext::More((next, res)) => {
                 let _ = res?;
                 curr = next;
@@ -217,7 +217,7 @@ pub async fn get_verified_size(connection: &Connection, hash: &Hash) -> GetResul
 /// the hash seq and the last chunk of each child.
 ///
 /// This can be used to compute the total size when requesting a hash seq.
-pub async fn get_hash_seq_and_sizes(
+pub async fn get_hash_seq_and_sizes<H: Hasher>(
     connection: &Connection,
     hash: &Hash,
     max_size: u64,
@@ -240,7 +240,7 @@ pub async fn get_hash_seq_and_sizes(
     if size > max_size {
         return Err(BadRequestSnafu.into_error(anyhow::anyhow!("size too large").into()));
     }
-    let (mut curr, hash_seq) = at_blob_content.concatenate_into_vec().await?;
+    let (mut curr, hash_seq) = at_blob_content.concatenate_into_vec::<H>().await?;
     let hash_seq = HashSeq::try_from(Bytes::from(hash_seq))
         .map_err(|e| BadRequestSnafu.into_error(e.into()))?;
     let mut sizes = Vec::with_capacity(hash_seq.len());
@@ -253,7 +253,7 @@ pub async fn get_hash_seq_and_sizes(
                 };
                 let at_header = more.next(hash);
                 let (at_content, size) = at_header.next().await?;
-                let next = at_content.drain().await?;
+                let next = at_content.drain::<H>().await?;
                 sizes.push(size);
                 curr = next;
             }
@@ -280,7 +280,7 @@ pub async fn get_hash_seq_and_sizes(
 ///
 /// It is usually not very helpful to try to distinguish between these two
 /// cases.
-pub async fn get_chunk_probe(
+pub async fn get_chunk_probe<H: Hasher>(
     connection: &Connection,
     hash: &Hash,
     chunk: ChunkNum,
@@ -296,7 +296,7 @@ pub async fn get_chunk_probe(
     let header = start.next();
     let (mut curr, _size) = header.next().await?;
     let end = loop {
-        match curr.next().await {
+        match curr.next::<H>().await {
             fsm::BlobContentNext::More((next, res)) => {
                 res?;
                 curr = next;

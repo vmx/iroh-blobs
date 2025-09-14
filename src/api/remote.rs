@@ -471,7 +471,7 @@ impl Remote {
         self.local_for_request(request).await
     }
 
-    pub fn fetch(
+    pub fn fetch<H: Hasher>(
         &self,
         conn: impl GetConnection + Send + 'static,
         content: impl Into<HashAndFormat>,
@@ -482,7 +482,7 @@ impl Remote {
         let sink = TokioMpscSenderSink(tx).with_map(GetProgressItem::Progress);
         let this = self.clone();
         let fut = async move {
-            let res = this.fetch_sink(conn, content, sink).await.into();
+            let res = this.fetch_sink::<H>(conn, content, sink).await.into();
             tx2.send(res).await.ok();
         };
         GetProgress {
@@ -498,7 +498,7 @@ impl Remote {
     /// is the aggregated number of downloaded payload bytes in the request.
     ///
     /// This will return the stats of the download.
-    pub(crate) async fn fetch_sink(
+    pub(crate) async fn fetch_sink<H: Hasher>(
         &self,
         mut conn: impl GetConnection,
         content: impl Into<HashAndFormat>,
@@ -517,7 +517,7 @@ impl Remote {
             .connection()
             .await
             .map_err(|e| LocalFailureSnafu.into_error(e.into()))?;
-        let stats = self.execute_get_sink(&conn, request, progress).await?;
+        let stats = self.execute_get_sink::<H>(&conn, request, progress).await?;
         Ok(stats)
     }
 
@@ -622,17 +622,17 @@ impl Remote {
         Ok(Default::default())
     }
 
-    pub fn execute_get(&self, conn: Connection, request: GetRequest) -> GetProgress {
-        self.execute_get_with_opts(conn, request)
+    pub fn execute_get<H: Hasher>(&self, conn: Connection, request: GetRequest) -> GetProgress {
+        self.execute_get_with_opts::<H>(conn, request)
     }
 
-    pub fn execute_get_with_opts(&self, conn: Connection, request: GetRequest) -> GetProgress {
+    pub fn execute_get_with_opts<H: Hasher>(&self, conn: Connection, request: GetRequest) -> GetProgress {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let tx2 = tx.clone();
         let sink = TokioMpscSenderSink(tx).with_map(GetProgressItem::Progress);
         let this = self.clone();
         let fut = async move {
-            let res = this.execute_get_sink(&conn, request, sink).await.into();
+            let res = this.execute_get_sink::<H>(&conn, request, sink).await.into();
             tx2.send(res).await.ok();
         };
         GetProgress {
@@ -649,7 +649,7 @@ impl Remote {
     /// This will download the data again even if the data is locally present.
     ///
     /// This will return the stats of the download.
-    pub(crate) async fn execute_get_sink(
+    pub(crate) async fn execute_get_sink<H: Hasher>(
         &self,
         conn: &Connection,
         request: GetRequest,
@@ -666,7 +666,7 @@ impl Remote {
         let next_child = match connected.next().await? {
             ConnectedNext::StartRoot(at_start_root) => {
                 let header = at_start_root.next();
-                let end = get_blob_ranges_impl(header, root, store, &mut progress).await?;
+                let end = get_blob_ranges_impl::<H>(header, root, store, &mut progress).await?;
                 match end.next() {
                     EndBlobNext::MoreChildren(at_start_child) => Ok(at_start_child),
                     EndBlobNext::Closing(at_closing) => Err(at_closing),
@@ -698,7 +698,7 @@ impl Remote {
                     };
                     trace!("getting child {offset} {}", hash.fmt_short());
                     let header = at_start_child.next(hash);
-                    let end = get_blob_ranges_impl(header, hash, store, &mut progress).await?;
+                    let end = get_blob_ranges_impl::<H>(header, hash, store, &mut progress).await?;
                     next_child = match end.next() {
                         EndBlobNext::MoreChildren(at_start_child) => Ok(at_start_child),
                         EndBlobNext::Closing(at_closing) => Err(at_closing),
@@ -713,13 +713,13 @@ impl Remote {
         Ok(stats)
     }
 
-    pub fn execute_get_many(&self, conn: Connection, request: GetManyRequest) -> GetProgress {
+    pub fn execute_get_many<H: Hasher>(&self, conn: Connection, request: GetManyRequest) -> GetProgress {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let tx2 = tx.clone();
         let sink = TokioMpscSenderSink(tx).with_map(GetProgressItem::Progress);
         let this = self.clone();
         let fut = async move {
-            let res = this.execute_get_many_sink(conn, request, sink).await.into();
+            let res = this.execute_get_many_sink::<H>(conn, request, sink).await.into();
             tx2.send(res).await.ok();
         };
         GetProgress {
@@ -736,7 +736,7 @@ impl Remote {
     /// This will download the data again even if the data is locally present.
     ///
     /// This will return the stats of the download.
-    pub async fn execute_get_many_sink(
+    pub async fn execute_get_many_sink<H: Hasher>(
         &self,
         conn: Connection,
         request: GetManyRequest,
@@ -761,7 +761,7 @@ impl Remote {
                     };
                     trace!("getting child {offset} {}", hash.fmt_short());
                     let header = at_start_child.next(hash);
-                    let end = get_blob_ranges_impl(header, hash, store, &mut progress).await?;
+                    let end = get_blob_ranges_impl::<H>(header, hash, store, &mut progress).await?;
                     next_child = match end.next() {
                         EndBlobNext::MoreChildren(at_start_child) => Ok(at_start_child),
                         EndBlobNext::Closing(at_closing) => Err(at_closing),
@@ -829,7 +829,7 @@ use std::{
 
 use bao_tree::{
     io::{BaoContentItem, Leaf},
-    ChunkNum, ChunkRanges,
+    ChunkNum, ChunkRanges, Hasher,
 };
 use iroh::endpoint::Connection;
 use tracing::{debug, trace};
@@ -873,7 +873,7 @@ fn get_buffer_size(size: NonZeroU64) -> usize {
     (size.get() / (IROH_BLOCK_SIZE.bytes() as u64) + 2).min(64) as usize
 }
 
-async fn get_blob_ranges_impl(
+async fn get_blob_ranges_impl<H: Hasher>(
     header: AtBlobHeader,
     hash: Hash,
     store: &Store,
@@ -882,7 +882,7 @@ async fn get_blob_ranges_impl(
     let (mut content, size) = header.next().await?;
     let Some(size) = NonZeroU64::new(size) else {
         return if hash == Hash::EMPTY {
-            let end = content.drain().await?;
+            let end = content.drain::<H>().await?;
             Ok(end)
         } else {
             Err(DecodeError::leaf_hash_mismatch(ChunkNum(0)).into())
@@ -896,7 +896,7 @@ async fn get_blob_ranges_impl(
         .map_err(|e| LocalFailureSnafu.into_error(e.into()))?;
     let write = async move {
         GetResult::Ok(loop {
-            match content.next().await {
+            match content.next::<H>().await {
                 BlobContentNext::More((next, res)) => {
                     let item = res?;
                     progress

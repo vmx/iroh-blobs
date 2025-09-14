@@ -14,7 +14,7 @@
 //! to rpc requests.
 use std::{io, net::SocketAddr, ops::Deref};
 
-use bao_tree::io::EncodeError;
+use bao_tree::{io::EncodeError, Hasher};
 use iroh::Endpoint;
 use irpc::rpc::{listen, RemoteService};
 use n0_snafu::SpanTrace;
@@ -279,8 +279,8 @@ impl Store {
     /// Unlike the other APIs, this creates an object that has internal state,
     /// so don't create it ad hoc but store it somewhere if you need it multiple
     /// times.
-    pub fn downloader(&self, endpoint: &Endpoint) -> downloader::Downloader {
-        downloader::Downloader::new(self, endpoint)
+    pub fn downloader<H: Hasher + 'static>(&self, endpoint: &Endpoint) -> downloader::Downloader {
+        downloader::Downloader::new::<H>(self, endpoint)
     }
 
     /// Connect to a remote store as a rpc client.

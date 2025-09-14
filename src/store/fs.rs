@@ -78,14 +78,13 @@ use std::{
 };
 
 use bao_tree::{
-    blake3,
     io::{
         mixed::{traverse_ranges_validated, EncodedItem, ReadBytesAt},
         outboard::PreOrderOutboard,
         sync::ReadAt,
         BaoContentItem, Leaf,
     },
-    BaoTree, ChunkNum, ChunkRanges,
+    BaoTree, ChunkNum, ChunkRanges, Hasher,
 };
 use bytes::Bytes;
 use delete_set::{BaoFilePart, ProtectHandle};
@@ -261,7 +260,7 @@ impl SyncEntityApi for HashContext {
     /// If the state is Initial, this will start the load.
     /// If it is Loading, it will wait until loading is done.
     /// If it is any other state, it will be a noop.
-    async fn load(&self) {
+    async fn load<H: Hasher>(&self) {
         enum Action {
             Load,
             Wait,
@@ -291,7 +290,7 @@ impl SyncEntityApi for HashContext {
                     // we must assign a new state even in the error case, otherwise
                     // tasks waiting for loading would stall!
                     match self.global.db.get(self.id).await {
-                        Ok(state) => match BaoFileStorage::open(state, self).await {
+                        Ok(state) => match BaoFileStorage::open::<H>(state, self).await {
                             Ok(handle) => handle,
                             Err(_) => BaoFileStorage::Poisoned,
                         },
@@ -381,7 +380,7 @@ impl HashContext {
         let tree = BaoTree::new(self.current_size()?, IROH_BLOCK_SIZE);
         let outboard = self.outboard_reader();
         Ok(PreOrderOutboard {
-            root: blake3::Hash::from(self.id),
+            root: bao_tree::Hash::from(self.id),
             tree,
             data: outboard,
         })
@@ -454,7 +453,7 @@ impl Actor {
         tx.send(tt).await.ok();
     }
 
-    async fn handle_command(&mut self, cmd: Command) {
+    async fn handle_command<H: Hasher + 'static>(&mut self, cmd: Command) {
         let span = cmd.parent_span();
         let _entered = span.enter();
         match cmd {
@@ -530,40 +529,40 @@ impl Actor {
             }
             Command::ImportBytes(cmd) => {
                 trace!("{cmd:?}");
-                self.spawn(import_bytes(cmd, self.context()));
+                self.spawn(import_bytes::<H>(cmd, self.context()));
             }
             Command::ImportByteStream(cmd) => {
                 trace!("{cmd:?}");
-                self.spawn(import_byte_stream(cmd, self.context()));
+                self.spawn(import_byte_stream::<H>(cmd, self.context()));
             }
             Command::ImportPath(cmd) => {
                 trace!("{cmd:?}");
-                self.spawn(import_path(cmd, self.context()));
+                self.spawn(import_path::<H>(cmd, self.context()));
             }
             Command::ExportPath(cmd) => {
                 trace!("{cmd:?}");
-                cmd.spawn(&mut self.handles, &mut self.tasks).await;
+                cmd.spawn::<H>(&mut self.handles, &mut self.tasks).await;
             }
             Command::ExportBao(cmd) => {
                 trace!("{cmd:?}");
-                cmd.spawn(&mut self.handles, &mut self.tasks).await;
+                cmd.spawn::<H>(&mut self.handles, &mut self.tasks).await;
             }
             Command::ExportRanges(cmd) => {
                 trace!("{cmd:?}");
-                cmd.spawn(&mut self.handles, &mut self.tasks).await;
+                cmd.spawn::<H>(&mut self.handles, &mut self.tasks).await;
             }
             Command::ImportBao(cmd) => {
                 trace!("{cmd:?}");
-                cmd.spawn(&mut self.handles, &mut self.tasks).await;
+                cmd.spawn::<H>(&mut self.handles, &mut self.tasks).await;
             }
             Command::Observe(cmd) => {
                 trace!("{cmd:?}");
-                cmd.spawn(&mut self.handles, &mut self.tasks).await;
+                cmd.spawn::<H>(&mut self.handles, &mut self.tasks).await;
             }
         }
     }
 
-    async fn handle_fs_command(&mut self, cmd: InternalCommand) {
+    async fn handle_fs_command<H: Hasher + 'static>(&mut self, cmd: InternalCommand) {
         let span = cmd.parent_span();
         let _entered = span.enter();
         match cmd {
@@ -590,13 +589,13 @@ impl Actor {
                             format: cmd.format,
                         },
                     );
-                    (tt, cmd).spawn(&mut self.handles, &mut self.tasks).await;
+                    (tt, cmd).spawn::<H>(&mut self.handles, &mut self.tasks).await;
                 }
             }
         }
     }
 
-    async fn run(mut self) {
+    async fn run<H: Hasher + 'static>(mut self) {
         loop {
             tokio::select! {
                 task = self.handles.tick() => {
@@ -608,10 +607,10 @@ impl Actor {
                     let Some(cmd) = cmd else {
                         break;
                     };
-                    self.handle_command(cmd).await;
+                    self.handle_command::<H>(cmd).await;
                 }
                 Some(cmd) = self.fs_cmd_rx.recv() => {
-                    self.handle_fs_command(cmd).await;
+                    self.handle_fs_command::<H>(cmd).await;
                 }
                 Some(res) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     Self::log_task_result(res);
@@ -677,13 +676,13 @@ impl Actor {
 
 trait HashSpecificCommand: HashSpecific + Send + 'static {
     /// Handle the command on success by spawning a task into the per-hash context.
-    fn handle(self, ctx: HashContext) -> impl Future<Output = ()> + Send + 'static;
+    fn handle<H: Hasher + 'static>(self, ctx: HashContext) -> impl Future<Output = ()> + Send + 'static;
 
     /// Opportunity to send an error if spawning fails due to the task being busy (inbox full)
     /// or dead (e.g. panic in one of the running tasks).
     fn on_error(self, arg: SpawnArg<EmParams>) -> impl Future<Output = ()> + Send + 'static;
 
-    async fn spawn(
+    async fn spawn<H: Hasher + 'static>(
         self,
         manager: &mut entity_manager::EntityManagerState<EmParams>,
         tasks: &mut JoinSet<()>,
@@ -696,7 +695,7 @@ trait HashSpecificCommand: HashSpecific + Send + 'static {
                 async move {
                     match arg {
                         SpawnArg::Active(state) => {
-                            self.handle(state).await;
+                            self.handle::<H>(state).await;
                         }
                         SpawnArg::Busy => {
                             self.on_error(arg).await;
@@ -716,14 +715,14 @@ trait HashSpecificCommand: HashSpecific + Send + 'static {
 }
 
 impl HashSpecificCommand for ObserveMsg {
-    async fn handle(self, ctx: HashContext) {
-        ctx.observe(self).await
+    async fn handle<H: Hasher + 'static>(self, ctx: HashContext) {
+        ctx.observe::<H>(self).await
     }
     async fn on_error(self, _arg: SpawnArg<EmParams>) {}
 }
 impl HashSpecificCommand for ExportPathMsg {
-    async fn handle(self, ctx: HashContext) {
-        ctx.export_path(self).await
+    async fn handle<H: Hasher + 'static>(self, ctx: HashContext) {
+        ctx.export_path::<H>(self).await
     }
     async fn on_error(self, arg: SpawnArg<EmParams>) {
         let err = match arg {
@@ -738,8 +737,8 @@ impl HashSpecificCommand for ExportPathMsg {
     }
 }
 impl HashSpecificCommand for ExportBaoMsg {
-    async fn handle(self, ctx: HashContext) {
-        ctx.export_bao(self).await
+    async fn handle<H: Hasher+ 'static>(self, ctx: HashContext) {
+        ctx.export_bao::<H>(self).await
     }
     async fn on_error(self, arg: SpawnArg<EmParams>) {
         let err = match arg {
@@ -754,8 +753,8 @@ impl HashSpecificCommand for ExportBaoMsg {
     }
 }
 impl HashSpecificCommand for ExportRangesMsg {
-    async fn handle(self, ctx: HashContext) {
-        ctx.export_ranges(self).await
+    async fn handle<H: Hasher + 'static>(self, ctx: HashContext) {
+        ctx.export_ranges::<H>(self).await
     }
     async fn on_error(self, arg: SpawnArg<EmParams>) {
         let err = match arg {
@@ -770,8 +769,8 @@ impl HashSpecificCommand for ExportRangesMsg {
     }
 }
 impl HashSpecificCommand for ImportBaoMsg {
-    async fn handle(self, ctx: HashContext) {
-        ctx.import_bao(self).await
+    async fn handle<H: Hasher + 'static>(self, ctx: HashContext) {
+        ctx.import_bao::<H>(self).await
     }
     async fn on_error(self, arg: SpawnArg<EmParams>) {
         let err = match arg {
@@ -788,9 +787,9 @@ impl HashSpecific for (TempTag, ImportEntryMsg) {
     }
 }
 impl HashSpecificCommand for (TempTag, ImportEntryMsg) {
-    async fn handle(self, ctx: HashContext) {
+    async fn handle<H: Hasher + 'static>(self, ctx: HashContext) {
         let (tt, cmd) = self;
-        ctx.finish_import(cmd, tt).await
+        ctx.finish_import::<H>(cmd, tt).await
     }
     async fn on_error(self, arg: SpawnArg<EmParams>) {
         let err = match arg {
@@ -859,17 +858,17 @@ async fn handle_batch_impl(cmd: BatchMsg, id: Scope, scope: &Arc<TempTagScope>) 
 /// The minimal API you need to implement for an entity for a store to work.
 trait EntityApi {
     /// Import from a stream of n0 bao encoded data.
-    async fn import_bao(&self, cmd: ImportBaoMsg);
+    async fn import_bao<H: Hasher>(&self, cmd: ImportBaoMsg);
     /// Finish an import from a local file or memory.
-    async fn finish_import(&self, cmd: ImportEntryMsg, tt: TempTag);
+    async fn finish_import<H: Hasher>(&self, cmd: ImportEntryMsg, tt: TempTag);
     /// Observe the bitfield of the entry.
-    async fn observe(&self, cmd: ObserveMsg);
+    async fn observe<H: Hasher>(&self, cmd: ObserveMsg);
     /// Export byte ranges of the entry as data
-    async fn export_ranges(&self, cmd: ExportRangesMsg);
+    async fn export_ranges<H: Hasher>(&self, cmd: ExportRangesMsg);
     /// Export chunk ranges of the entry as a n0 bao encoded stream.
-    async fn export_bao(&self, cmd: ExportBaoMsg);
+    async fn export_bao<H: Hasher>(&self, cmd: ExportBaoMsg);
     /// Export the entry to a local file.
-    async fn export_path(&self, cmd: ExportPathMsg);
+    async fn export_path<H: Hasher>(&self, cmd: ExportPathMsg);
     /// Persist the entry at the end of its lifecycle.
     async fn persist(&self);
 }
@@ -880,7 +879,7 @@ trait SyncEntityApi: EntityApi {
     /// Load the entry state from the database. This must make sure that it is
     /// not run concurrently, so if load is called multiple times, all but one
     /// must wait. You can use a tokio::sync::OnceCell or similar to achieve this.
-    async fn load(&self);
+    async fn load<H: Hasher>(&self);
 
     /// Get a synchronous reader for the data file.
     fn data_reader(&self) -> impl ReadBytesAt;
@@ -901,9 +900,9 @@ trait SyncEntityApi: EntityApi {
 /// The high level entry point per entry.
 impl EntityApi for HashContext {
     #[instrument(skip_all, fields(hash = %cmd.hash_short()))]
-    async fn import_bao(&self, cmd: ImportBaoMsg) {
+    async fn import_bao<H: Hasher>(&self, cmd: ImportBaoMsg) {
         trace!("{cmd:?}");
-        self.load().await;
+        self.load::<H>().await;
         let ImportBaoMsg {
             inner: ImportBaoRequest { size, .. },
             rx,
@@ -916,9 +915,9 @@ impl EntityApi for HashContext {
     }
 
     #[instrument(skip_all, fields(hash = %cmd.hash_short()))]
-    async fn observe(&self, cmd: ObserveMsg) {
+    async fn observe<H: Hasher>(&self, cmd: ObserveMsg) {
         trace!("{cmd:?}");
-        self.load().await;
+        self.load::<H>().await;
         BaoFileStorageSubscriber::new(self.state.subscribe())
             .forward(cmd.tx)
             .await
@@ -926,9 +925,9 @@ impl EntityApi for HashContext {
     }
 
     #[instrument(skip_all, fields(hash = %cmd.hash_short()))]
-    async fn export_ranges(&self, mut cmd: ExportRangesMsg) {
+    async fn export_ranges<H: Hasher>(&self, mut cmd: ExportRangesMsg) {
         trace!("{cmd:?}");
-        self.load().await;
+        self.load::<H>().await;
         if let Err(cause) = export_ranges_impl(self, cmd.inner, &mut cmd.tx).await {
             cmd.tx
                 .send(ExportRangesItem::Error(cause.into()))
@@ -938,10 +937,10 @@ impl EntityApi for HashContext {
     }
 
     #[instrument(skip_all, fields(hash = %cmd.hash_short()))]
-    async fn export_bao(&self, mut cmd: ExportBaoMsg) {
+    async fn export_bao<H: Hasher>(&self, mut cmd: ExportBaoMsg) {
         trace!("{cmd:?}");
-        self.load().await;
-        if let Err(cause) = export_bao_impl(self, cmd.inner, &mut cmd.tx).await {
+        self.load::<H>().await;
+        if let Err(cause) = export_bao_impl::<H>(self, cmd.inner, &mut cmd.tx).await {
             // if the entry is in state NonExisting, this will be an io error with
             // kind NotFound. So we must not wrap this somehow but pass it on directly.
             cmd.tx
@@ -952,9 +951,9 @@ impl EntityApi for HashContext {
     }
 
     #[instrument(skip_all, fields(hash = %cmd.hash_short()))]
-    async fn export_path(&self, cmd: ExportPathMsg) {
+    async fn export_path<H: Hasher>(&self, cmd: ExportPathMsg) {
         trace!("{cmd:?}");
-        self.load().await;
+        self.load::<H>().await;
         let ExportPathMsg { inner, mut tx, .. } = cmd;
         if let Err(cause) = export_path_impl(self, inner, &mut tx).await {
             tx.send(cause.into()).await.ok();
@@ -962,10 +961,10 @@ impl EntityApi for HashContext {
     }
 
     #[instrument(skip_all, fields(hash = %cmd.hash_short()))]
-    async fn finish_import(&self, cmd: ImportEntryMsg, mut tt: TempTag) {
+    async fn finish_import<H: Hasher>(&self, cmd: ImportEntryMsg, mut tt: TempTag) {
         trace!("{cmd:?}");
-        self.load().await;
-        let res = match finish_import_impl(self, cmd.inner).await {
+        self.load::<H>().await;
+        let res = match finish_import_impl::<H>(self, cmd.inner).await {
             Ok(()) => {
                 // for a remote call, we can't have the on_drop callback, so we have to leak the temp tag
                 // it will be cleaned up when either the process exits or scope ends
@@ -1002,7 +1001,7 @@ impl EntityApi for HashContext {
     }
 }
 
-async fn finish_import_impl(ctx: &HashContext, import_data: ImportEntry) -> io::Result<()> {
+async fn finish_import_impl<H: Hasher>(ctx: &HashContext, import_data: ImportEntry) -> io::Result<()> {
     if ctx.id == Hash::EMPTY {
         return Ok(()); // nothing to do for the empty hash
     }
@@ -1024,7 +1023,7 @@ async fn finish_import_impl(ctx: &HashContext, import_data: ImportEntry) -> io::
             debug_assert!(!options.is_inlined_data(*size));
         }
     }
-    ctx.load().await;
+    ctx.load::<H>().await;
     let handle = &ctx.state;
     // if I do have an existing handle, I have to possibly deal with observers.
     // if I don't have an existing handle, there are 2 cases:
@@ -1188,7 +1187,7 @@ async fn export_ranges_impl(
     Ok(())
 }
 
-async fn export_bao_impl(
+async fn export_bao_impl<H: Hasher>(
     ctx: &HashContext,
     cmd: ExportBaoRequest,
     tx: &mut mpsc::Sender<EncodedItem>,
@@ -1203,7 +1202,7 @@ async fn export_bao_impl(
     trace!("exporting bao: {hash} {ranges:?} size={size}",);
     let data = ctx.data_reader();
     let tx = BaoTreeSender::new(tx);
-    traverse_ranges_validated(data, outboard, &ranges, tx).await?;
+    traverse_ranges_validated::<_, _, _, H>(data, outboard, &ranges, tx).await?;
     Ok(())
 }
 
@@ -1364,15 +1363,15 @@ async fn copy_with_progress<T: CopyProgress>(
 
 impl FsStore {
     /// Load or create a new store.
-    pub async fn load(root: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub async fn load<H: Hasher + 'static>(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = root.as_ref();
         let db_path = path.join("blobs.db");
         let options = Options::new(path);
-        Self::load_with_opts(db_path, options).await
+        Self::load_with_opts::<H>(db_path, options).await
     }
 
     /// Load or create a new store with custom options, returning an additional sender for file store specific commands.
-    pub async fn load_with_opts(db_path: PathBuf, options: Options) -> anyhow::Result<FsStore> {
+    pub async fn load_with_opts<H: Hasher + 'static>(db_path: PathBuf, options: Options) -> anyhow::Result<FsStore> {
         static THREAD_NR: AtomicU64 = AtomicU64::new(0);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .thread_name_fn(|| {
@@ -1397,7 +1396,7 @@ impl FsStore {
                 Arc::new(options),
             ))
             .await??;
-        handle.spawn(actor.run());
+        handle.spawn(actor.run::<H>());
         let store = FsStore::new(commands_tx.into(), fs_commands_tx);
         if let Some(config) = gc_config {
             handle.spawn(run_gc(store.deref().clone(), config));

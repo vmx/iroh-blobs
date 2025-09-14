@@ -20,7 +20,7 @@ use std::{
 
 use bao_tree::{
     io::outboard::{PreOrderMemOutboard, PreOrderOutboard},
-    BaoTree, ChunkNum,
+    BaoTree, ChunkNum, Hasher,
 };
 use bytes::Bytes;
 use genawaiter::sync::Gen;
@@ -158,22 +158,22 @@ impl ImportEntry {
 
 /// Start a task to import from a [`Bytes`] in memory.
 #[instrument(skip_all, fields(data = cmd.data.len()))]
-pub async fn import_bytes(cmd: ImportBytesMsg, ctx: Arc<TaskContext>) {
+pub async fn import_bytes<H: Hasher>(cmd: ImportBytesMsg, ctx: Arc<TaskContext>) {
     let size = cmd.data.len() as u64;
     if ctx.options.is_inlined_all(size) {
-        import_bytes_tiny_outer(cmd, ctx).await;
+        import_bytes_tiny_outer::<H>(cmd, ctx).await;
     } else {
         let request = ImportByteStreamRequest {
             format: cmd.format,
             scope: cmd.scope,
         };
         let stream = stream::iter(Some(Ok(cmd.data.clone())));
-        import_byte_stream_mid(request, cmd.tx, cmd.span, stream, ctx).await;
+        import_byte_stream_mid::<H>(request, cmd.tx, cmd.span, stream, ctx).await;
     }
 }
 
-async fn import_bytes_tiny_outer(mut cmd: ImportBytesMsg, ctx: Arc<TaskContext>) {
-    match import_bytes_tiny_impl(cmd.inner, &mut cmd.tx).await {
+async fn import_bytes_tiny_outer<H: Hasher>(mut cmd: ImportBytesMsg, ctx: Arc<TaskContext>) {
+    match import_bytes_tiny_impl::<H>(cmd.inner, &mut cmd.tx).await {
         Ok(entry) => {
             let entry = ImportEntryMsg {
                 inner: entry,
@@ -189,7 +189,7 @@ async fn import_bytes_tiny_outer(mut cmd: ImportBytesMsg, ctx: Arc<TaskContext>)
     }
 }
 
-async fn import_bytes_tiny_impl(
+async fn import_bytes_tiny_impl<H: Hasher>(
     cmd: ImportBytesRequest,
     tx: &mut mpsc::Sender<AddProgressItem>,
 ) -> io::Result<ImportEntry> {
@@ -205,7 +205,7 @@ async fn import_bytes_tiny_impl(
     Ok(if raw_outboard_size(size) == 0 {
         // the thing is so small that it does not even need an outboard
         ImportEntry {
-            hash: Hash::new(&cmd.data),
+            hash: Hash::new::<H>(&cmd.data),
             format: cmd.format,
             scope: cmd.scope,
             source: ImportSource::Memory(cmd.data),
@@ -213,7 +213,7 @@ async fn import_bytes_tiny_impl(
         }
     } else {
         // we still know that computing the outboard will be super fast
-        let outboard = PreOrderMemOutboard::create(&cmd.data, IROH_BLOCK_SIZE);
+        let outboard = PreOrderMemOutboard::create::<H>(&cmd.data, IROH_BLOCK_SIZE);
         ImportEntry {
             hash: outboard.root.into(),
             format: cmd.format,
@@ -225,9 +225,9 @@ async fn import_bytes_tiny_impl(
 }
 
 #[instrument(skip_all)]
-pub async fn import_byte_stream(cmd: ImportByteStreamMsg, ctx: Arc<TaskContext>) {
+pub async fn import_byte_stream<H: Hasher>(cmd: ImportByteStreamMsg, ctx: Arc<TaskContext>) {
     let stream = into_stream(cmd.rx);
-    import_byte_stream_mid(cmd.inner, cmd.tx, cmd.span, stream, ctx).await
+    import_byte_stream_mid::<H>(cmd.inner, cmd.tx, cmd.span, stream, ctx).await
 }
 
 fn into_stream(
@@ -255,14 +255,14 @@ fn into_stream(
     })
 }
 
-async fn import_byte_stream_mid(
+async fn import_byte_stream_mid<H: Hasher>(
     request: ImportByteStreamRequest,
     mut tx: mpsc::Sender<AddProgressItem>,
     span: tracing::Span,
     stream: impl Stream<Item = io::Result<Bytes>> + Unpin,
     ctx: Arc<TaskContext>,
 ) {
-    match import_byte_stream_impl(request, &mut tx, stream, ctx.options.clone()).await {
+    match import_byte_stream_impl::<H>(request, &mut tx, stream, ctx.options.clone()).await {
         Ok(entry) => {
             let entry = ImportEntryMsg {
                 inner: entry,
@@ -278,7 +278,7 @@ async fn import_byte_stream_mid(
     }
 }
 
-async fn import_byte_stream_impl(
+async fn import_byte_stream_impl<H: Hasher>(
     cmd: ImportByteStreamRequest,
     tx: &mut mpsc::Sender<AddProgressItem>,
     stream: impl Stream<Item = io::Result<Bytes>> + Unpin,
@@ -292,7 +292,7 @@ async fn import_byte_stream_impl(
     tx.send(AddProgressItem::CopyDone)
         .await
         .map_err(|_e| io::Error::other("error"))?;
-    compute_outboard(import_source, format, scope, options, tx).await
+    compute_outboard::<H>(import_source, format, scope, options, tx).await
 }
 
 async fn get_import_source(
@@ -381,7 +381,7 @@ impl Sink<ChunkNum> for OutboardProgress {
     }
 }
 
-async fn compute_outboard(
+async fn compute_outboard<H: Hasher>(
     source: ImportSource,
     format: BlobFormat,
     scope: Scope,
@@ -390,7 +390,7 @@ async fn compute_outboard(
 ) -> io::Result<ImportEntry> {
     let size = source.size();
     let tree = BaoTree::new(size, IROH_BLOCK_SIZE);
-    let root = bao_tree::blake3::Hash::from_bytes([0; 32]);
+    let root = bao_tree::Hash::from_bytes([0; 32]);
     let outboard_size = raw_outboard_size(size);
     let send_progress = OutboardProgress::ref_cast_mut(tx);
     let mut data = source.read();
@@ -407,7 +407,7 @@ async fn compute_outboard(
             root,
             data: &mut outboard_file,
         };
-        init_outboard(data, &mut outboard, send_progress).await??;
+        init_outboard::<_, _, _, H>(data, &mut outboard, send_progress).await??;
         (outboard.root, MemOrFile::File(outboard_path))
     } else {
         // outboard will be stored in memory, so compute it to a memory buffer
@@ -418,7 +418,7 @@ async fn compute_outboard(
             root,
             data: &mut outboard_file,
         };
-        init_outboard(data, &mut outboard, send_progress).await??;
+        init_outboard::<_, _, _, H>(data, &mut outboard, send_progress).await??;
         (outboard.root, MemOrFile::Mem(Bytes::from(outboard_file)))
     };
     Ok(ImportEntry {
@@ -431,8 +431,8 @@ async fn compute_outboard(
 }
 
 #[instrument(skip_all, fields(path = %cmd.path.display()))]
-pub async fn import_path(mut cmd: ImportPathMsg, context: Arc<TaskContext>) {
-    match import_path_impl(cmd.inner, &mut cmd.tx, context.options.clone()).await {
+pub async fn import_path<H: Hasher>(mut cmd: ImportPathMsg, context: Arc<TaskContext>) {
+    match import_path_impl::<H>(cmd.inner, &mut cmd.tx, context.options.clone()).await {
         Ok(inner) => {
             let res = ImportEntryMsg {
                 inner,
@@ -448,7 +448,7 @@ pub async fn import_path(mut cmd: ImportPathMsg, context: Arc<TaskContext>) {
     }
 }
 
-async fn import_path_impl(
+async fn import_path_impl<H: Hasher>(
     cmd: ImportPathRequest,
     tx: &mut mpsc::Sender<AddProgressItem>,
     options: Arc<Options>,
@@ -505,7 +505,7 @@ async fn import_path_impl(
             .map_err(|_| io::Error::other("error"))?;
         ImportSource::TempFile(temp_path, file, size)
     };
-    compute_outboard(import_source, format, batch, options, tx).await
+    compute_outboard::<H>(import_source, format, batch, options, tx).await
 }
 
 #[cfg(test)]

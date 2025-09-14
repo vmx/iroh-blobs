@@ -246,9 +246,9 @@ dependencies = [
 [[package]]
 name = "bao-tree"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff16d65e48353db458be63ee395c03028f24564fd48668389bd65fd945f5ac36"
+source = "git+https://github.com/vmx/bao-tree?branch=generic-hasher#ccb55ba7752b2a1dd41d09c0d72ced4f6af565f8"
 dependencies = [
+ "arrayvec",
  "blake3",
  "bytes",
  "futures-lite",

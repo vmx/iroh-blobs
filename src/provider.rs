@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use bao_tree::ChunkRanges;
+use bao_tree::{ChunkRanges, Hasher};
 use iroh::endpoint::{self, RecvStream, SendStream};
 use n0_future::StreamExt;
 use quinn::{ClosedStream, ConnectionError, ReadToEndError};
@@ -311,7 +311,7 @@ impl ProgressWriter {
 }
 
 /// Handle a single connection.
-pub async fn handle_connection(
+pub async fn handle_connection<H: Hasher + 'static>(
     connection: endpoint::Connection,
     store: Store,
     progress: EventSender,
@@ -337,7 +337,7 @@ pub async fn handle_connection(
         while let Ok(context) = StreamPair::accept(&connection, &progress).await {
             let span = debug_span!("stream", stream_id = %context.request_id);
             let store = store.clone();
-            tokio::spawn(handle_stream(store, context).instrument(span));
+            tokio::spawn(handle_stream::<H>(store, context).instrument(span));
         }
         progress
             .connection_closed(|| ConnectionClosed { connection_id })
@@ -348,7 +348,7 @@ pub async fn handle_connection(
     .await
 }
 
-async fn handle_stream(store: Store, mut context: StreamPair) -> anyhow::Result<()> {
+async fn handle_stream<H: Hasher>(store: Store, mut context: StreamPair) -> anyhow::Result<()> {
     // 1. Decode the request.
     debug!("reading request");
     let request = context.read_request().await?;
@@ -381,7 +381,7 @@ async fn handle_stream(store: Store, mut context: StreamPair) -> anyhow::Result<
         }
         Request::Push(request) => {
             let mut reader = context.push_request(|| request.clone()).await?;
-            if handle_push(store, request, &mut reader).await.is_ok() {
+            if handle_push::<H>(store, request, &mut reader).await.is_ok() {
                 reader.transfer_completed().await;
             } else {
                 reader.transfer_aborted().await;
@@ -453,7 +453,7 @@ pub async fn handle_get_many(
 /// Handle a single push request.
 ///
 /// Requires a database, the request, and a reader.
-pub async fn handle_push(
+pub async fn handle_push<H: Hasher>(
     store: Store,
     request: PushRequest,
     reader: &mut ProgressReader,
@@ -465,7 +465,7 @@ pub async fn handle_push(
     if !root_ranges.is_empty() {
         // todo: send progress from import_bao_quinn or rename to import_bao_quinn_with_progress
         store
-            .import_bao_quinn(hash, root_ranges.clone(), &mut reader.inner)
+            .import_bao_quinn::<H>(hash, root_ranges.clone(), &mut reader.inner)
             .await?;
     }
     if request.ranges.is_blob() {
@@ -480,7 +480,7 @@ pub async fn handle_push(
             continue;
         }
         store
-            .import_bao_quinn(child_hash, child_ranges.clone(), &mut reader.inner)
+            .import_bao_quinn::<H>(child_hash, child_ranges.clone(), &mut reader.inner)
             .await?;
     }
     Ok(())

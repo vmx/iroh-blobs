@@ -19,7 +19,7 @@ use bao_tree::{
         sync::ReadAt,
         Leaf,
     },
-    BaoTree, ChunkRanges,
+    BaoTree, ChunkRanges, Hasher,
 };
 use bytes::Bytes;
 use irpc::channel::mpsc;
@@ -79,7 +79,7 @@ impl Actor {
         }
     }
 
-    async fn handle_command(&mut self, cmd: Command) -> Option<irpc::channel::oneshot::Sender<()>> {
+    async fn handle_command<H: Hasher + 'static>(&mut self, cmd: Command) -> Option<irpc::channel::oneshot::Sender<()>> {
         match cmd {
             Command::ImportBao(ImportBaoMsg { tx, .. }) => {
                 tx.send(Err(api::Error::Io(io::Error::other(
@@ -133,7 +133,7 @@ impl Actor {
                 ..
             }) => {
                 let entry = self.data.get(&hash).cloned();
-                self.tasks.spawn(export_bao(hash, entry, ranges, tx));
+                self.tasks.spawn(export_bao::<H>(hash, entry, ranges, tx));
             }
             Command::ExportPath(ExportPathMsg {
                 inner: ExportPathRequest { hash, target, .. },
@@ -226,11 +226,11 @@ impl Actor {
         }
     }
 
-    async fn run(mut self) {
+    async fn run<H: Hasher + 'static>(mut self) {
         loop {
             tokio::select! {
                 Some(cmd) = self.commands.recv() => {
-                    if let Some(shutdown) = self.handle_command(cmd).await {
+                    if let Some(shutdown) = self.handle_command::<H>(cmd).await {
                         shutdown.send(()).await.ok();
                         break;
                     }
@@ -250,7 +250,7 @@ impl Actor {
     }
 }
 
-async fn export_bao(
+async fn export_bao<H: Hasher>(
     hash: Hash,
     entry: Option<CompleteStorage>,
     ranges: ChunkRanges,
@@ -281,7 +281,7 @@ async fn export_bao(
         data: outboard,
     };
     let sender = BaoTreeSender::ref_cast_mut(&mut sender);
-    traverse_ranges_validated(data.as_ref(), outboard, &ranges, sender)
+    traverse_ranges_validated::<_, _, _, H>(data.as_ref(), outboard, &ranges, sender)
         .await
         .ok();
 }
@@ -348,16 +348,16 @@ async fn export_ranges_impl(
 }
 
 impl ReadonlyMemStore {
-    pub fn new(items: impl IntoIterator<Item = impl AsRef<[u8]>>) -> Self {
+    pub fn new<H: Hasher + 'static>(items: impl IntoIterator<Item = impl AsRef<[u8]>>) -> Self {
         let mut entries = HashMap::new();
         for item in items {
             let data = Bytes::copy_from_slice(item.as_ref());
-            let (hash, entry) = CompleteStorage::create(data);
+            let (hash, entry) = CompleteStorage::create::<H>(data);
             entries.insert(hash, entry);
         }
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         let actor = Actor::new(receiver, entries);
-        tokio::spawn(actor.run());
+        tokio::spawn(actor.run::<H>());
         let local = irpc::LocalSender::from(sender);
         Self {
             client: local.into(),
