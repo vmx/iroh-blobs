@@ -626,13 +626,20 @@ impl Remote {
         self.execute_get_with_opts::<H>(conn, request)
     }
 
-    pub fn execute_get_with_opts<H: Hasher>(&self, conn: Connection, request: GetRequest) -> GetProgress {
+    pub fn execute_get_with_opts<H: Hasher>(
+        &self,
+        conn: Connection,
+        request: GetRequest,
+    ) -> GetProgress {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let tx2 = tx.clone();
         let sink = TokioMpscSenderSink(tx).with_map(GetProgressItem::Progress);
         let this = self.clone();
         let fut = async move {
-            let res = this.execute_get_sink::<H>(&conn, request, sink).await.into();
+            let res = this
+                .execute_get_sink::<H>(&conn, request, sink)
+                .await
+                .into();
             tx2.send(res).await.ok();
         };
         GetProgress {
@@ -713,13 +720,20 @@ impl Remote {
         Ok(stats)
     }
 
-    pub fn execute_get_many<H: Hasher>(&self, conn: Connection, request: GetManyRequest) -> GetProgress {
+    pub fn execute_get_many<H: Hasher>(
+        &self,
+        conn: Connection,
+        request: GetManyRequest,
+    ) -> GetProgress {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let tx2 = tx.clone();
         let sink = TokioMpscSenderSink(tx).with_map(GetProgressItem::Progress);
         let this = self.clone();
         let fut = async move {
-            let res = this.execute_get_many_sink::<H>(conn, request, sink).await.into();
+            let res = this
+                .execute_get_many_sink::<H>(conn, request, sink)
+                .await
+                .into();
             tx2.send(res).await.ok();
         };
         GetProgress {
@@ -1065,7 +1079,7 @@ where
 #[cfg(test)]
 #[cfg(feature = "fs-store")]
 mod tests {
-    use bao_tree::{ChunkNum, ChunkRanges};
+    use bao_tree::{Blake3Hasher, ChunkNum, ChunkRanges, Hasher};
     use testresult::TestResult;
 
     use crate::{
@@ -1084,7 +1098,7 @@ mod tests {
     #[tokio::test]
     async fn test_local_info_raw() -> TestResult<()> {
         let td = tempfile::tempdir()?;
-        let store = FsStore::load(td.path().join("blobs.db")).await?;
+        let store = FsStore::load::<Blake3Hasher>(td.path().join("blobs.db")).await?;
         let blobs = store.blobs();
         let tt = blobs.add_slice(b"test").temp_tag().await?;
         let hash = *tt.hash();
@@ -1108,7 +1122,7 @@ mod tests {
             .sum::<u64>();
         let td = tempfile::tempdir()?;
         let hash_seq_ranges = ChunkRanges::chunks(16..32);
-        let store = FsStore::load(td.path().join("blobs.db")).await?;
+        let store = FsStore::load::<Blake3Hasher>(td.path().join("blobs.db")).await?;
         {
             // only add the hash seq itself, and only the first chunk of the children
             let present = |i| {
@@ -1118,7 +1132,8 @@ mod tests {
                     ChunkRanges::from(..ChunkNum(1))
                 }
             };
-            let content = add_test_hash_seq_incomplete(&store, sizes, present).await?;
+            let content =
+                add_test_hash_seq_incomplete::<Blake3Hasher>(&store, sizes, present).await?;
             let info = store.remote().local(content).await?;
             assert_eq!(info.bitfield.ranges, hash_seq_ranges);
             assert!(!info.is_complete());
@@ -1128,13 +1143,15 @@ mod tests {
         Ok(())
     }
 
-    async fn test_observe_partial(blobs: &Blobs) -> TestResult<()> {
+    async fn test_observe_partial<H: Hasher>(blobs: &Blobs) -> TestResult<()> {
         let sizes = INTERESTING_SIZES;
         for size in sizes {
             let data = test_data(size);
             let ranges = ChunkRanges::chunk(0);
-            let (hash, bao) = create_n0_bao(&data, &ranges)?;
-            blobs.import_bao_bytes(hash, ranges.clone(), bao).await?;
+            let (hash, bao) = create_n0_bao::<H>(&data, &ranges)?;
+            blobs
+                .import_bao_bytes::<H>(hash, ranges.clone(), bao)
+                .await?;
             let bitfield = blobs.observe(hash).await?;
             if size > 1024 {
                 assert_eq!(bitfield.ranges, ranges);
@@ -1147,16 +1164,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_observe_partial_mem() -> TestResult<()> {
-        let store = MemStore::new();
-        test_observe_partial(store.blobs()).await?;
+        let store = MemStore::<Blake3Hasher>::new();
+        test_observe_partial::<Blake3Hasher>(store.blobs()).await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_observe_partial_fs() -> TestResult<()> {
         let td = tempfile::tempdir()?;
-        let store = FsStore::load(td.path()).await?;
-        test_observe_partial(store.blobs()).await?;
+        let store = FsStore::load::<Blake3Hasher>(td.path()).await?;
+        test_observe_partial::<Blake3Hasher>(store.blobs()).await?;
         Ok(())
     }
 
@@ -1166,7 +1183,7 @@ mod tests {
         let total_size = sizes.iter().map(|x| *x as u64).sum::<u64>();
         let hash_seq_size = (sizes.len() as u64) * 32;
         let td = tempfile::tempdir()?;
-        let store = FsStore::load(td.path().join("blobs.db")).await?;
+        let store = FsStore::load::<Blake3Hasher>(td.path().join("blobs.db")).await?;
         {
             // only add the hash seq itself, none of the children
             let present = |i| {
@@ -1176,7 +1193,8 @@ mod tests {
                     ChunkRanges::empty()
                 }
             };
-            let content = add_test_hash_seq_incomplete(&store, sizes, present).await?;
+            let content =
+                add_test_hash_seq_incomplete::<Blake3Hasher>(&store, sizes, present).await?;
             let info = store.remote().local(content).await?;
             assert_eq!(info.bitfield.ranges, ChunkRanges::all());
             assert_eq!(info.local_bytes(), hash_seq_size);
@@ -1209,7 +1227,8 @@ mod tests {
                     ChunkRanges::from(..ChunkNum(1))
                 }
             };
-            let content = add_test_hash_seq_incomplete(&store, sizes, present).await?;
+            let content =
+                add_test_hash_seq_incomplete::<Blake3Hasher>(&store, sizes, present).await?;
             let info = store.remote().local(content).await?;
             let first_chunk_size = sizes.into_iter().map(|x| x.min(1024) as u64).sum::<u64>();
             assert_eq!(info.bitfield.ranges, ChunkRanges::all());
@@ -1252,7 +1271,7 @@ mod tests {
         let sizes = INTERESTING_SIZES;
         let hash_seq_size = (sizes.len() as u64) * 32;
         let td = tempfile::tempdir()?;
-        let store = FsStore::load(td.path().join("blobs.db")).await?;
+        let store = FsStore::load::<Blake3Hasher>(td.path().join("blobs.db")).await?;
         // only add the hash seq itself, and only the first chunk of the children
         let present = |i| {
             if i == 0 {
@@ -1261,7 +1280,7 @@ mod tests {
                 ChunkRanges::chunks(..2)
             }
         };
-        let content = add_test_hash_seq_incomplete(&store, sizes, present).await?;
+        let content = add_test_hash_seq_incomplete::<Blake3Hasher>(&store, sizes, present).await?;
         {
             let request: GetRequest = GetRequest::builder()
                 .root(ChunkRanges::all())

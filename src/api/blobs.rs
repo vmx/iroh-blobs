@@ -112,11 +112,12 @@ impl Blobs {
     ///
     /// Example:
     /// ```rust
+    /// use bao_tree::Blake3Hasher;
     /// use iroh_blobs::{store::mem::MemStore, api::blobs::Blobs};
     /// use tokio::io::AsyncReadExt;
     ///
     /// # async fn example() -> anyhow::Result<()> {
-    /// let store = MemStore::new();
+    /// let store = MemStore::<Blake3Hasher>::new();
     /// let tag = store.add_slice(b"Hello, world!").await?;
     /// let mut reader = store.reader(tag.hash);
     /// let mut buf = String::new();
@@ -489,7 +490,8 @@ impl Blobs {
         ranges: ChunkRanges,
         data: impl Into<Bytes>,
     ) -> RequestResult<()> {
-        self.import_bao_reader::<_, H>(hash, ranges, data.into()).await?;
+        self.import_bao_reader::<_, H>(hash, ranges, data.into())
+            .await?;
         Ok(())
     }
 

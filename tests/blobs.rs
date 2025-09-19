@@ -5,6 +5,7 @@ use std::{
     path::Path,
 };
 
+use bao_tree::{Blake3Hasher, Hasher};
 use iroh_blobs::{
     api::{
         blobs::{AddProgressItem, Blobs},
@@ -28,11 +29,11 @@ pub const INTERESTING_SIZES: [usize; 8] = [
     1024 * 1024 * 8, // data file, outboard file
 ];
 
-async fn blobs_smoke(path: &Path, blobs: &Blobs) -> TestResult<()> {
+async fn blobs_smoke<H: Hasher>(path: &Path, blobs: &Blobs) -> TestResult<()> {
     // test importing and exporting bytes
     {
         let expected = b"hello".to_vec();
-        let expected_hash = Hash::new(&expected);
+        let expected_hash = Hash::new::<H>(&expected);
         let tt = blobs.add_bytes(expected.clone()).await?;
         let hash = tt.hash;
         assert_eq!(hash, expected_hash);
@@ -47,7 +48,7 @@ async fn blobs_smoke(path: &Path, blobs: &Blobs) -> TestResult<()> {
         std::fs::write(&temp1, &expected)?;
         let tt = blobs.add_path(temp1).await?;
         let hash = tt.hash;
-        let expected_hash = Hash::new(&expected);
+        let expected_hash = Hash::new::<H>(&expected);
         assert_eq!(hash, expected_hash);
 
         let temp2 = path.join("test2");
@@ -70,7 +71,7 @@ async fn blobs_smoke(path: &Path, blobs: &Blobs) -> TestResult<()> {
             }
         }
         let actual_hash = res.as_ref().map(|x| *x.hash());
-        let expected_hash = Hash::new(&expected);
+        let expected_hash = Hash::new::<H>(&expected);
         assert_eq!(actual_hash, Some(expected_hash));
     }
 
@@ -85,8 +86,8 @@ async fn blobs_smoke(path: &Path, blobs: &Blobs) -> TestResult<()> {
 async fn blobs_smoke_fs() -> TestResult {
     tracing_subscriber::fmt::try_init().ok();
     let td = tempfile::tempdir()?;
-    let store = FsStore::load(td.path().join("a")).await?;
-    blobs_smoke(td.path(), store.blobs()).await?;
+    let store = FsStore::load::<Blake3Hasher>(td.path().join("a")).await?;
+    blobs_smoke::<Blake3Hasher>(td.path(), store.blobs()).await?;
     store.shutdown().await?;
     Ok(())
 }
@@ -95,8 +96,8 @@ async fn blobs_smoke_fs() -> TestResult {
 async fn blobs_smoke_mem() -> TestResult {
     tracing_subscriber::fmt::try_init().ok();
     let td = tempfile::tempdir()?;
-    let store = MemStore::new();
-    blobs_smoke(td.path(), store.blobs()).await?;
+    let store = MemStore::<Blake3Hasher>::new();
+    blobs_smoke::<Blake3Hasher>(td.path(), store.blobs()).await?;
     store.shutdown().await?;
     Ok(())
 }
@@ -108,10 +109,10 @@ async fn blobs_smoke_fs_rpc() -> TestResult {
     let (server, cert) = irpc::util::make_server_endpoint(unspecified)?;
     let client = irpc::util::make_client_endpoint(unspecified, &[cert.as_ref()])?;
     let td = tempfile::tempdir()?;
-    let store = FsStore::load(td.path().join("a")).await?;
+    let store = FsStore::load::<Blake3Hasher>(td.path().join("a")).await?;
     tokio::spawn(store.deref().clone().listen(server.clone()));
     let api = Store::connect(client, server.local_addr()?);
-    blobs_smoke(td.path(), api.blobs()).await?;
+    blobs_smoke::<Blake3Hasher>(td.path(), api.blobs()).await?;
     api.shutdown().await?;
     Ok(())
 }

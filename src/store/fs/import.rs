@@ -511,7 +511,7 @@ async fn import_path_impl<H: Hasher>(
 #[cfg(test)]
 mod tests {
 
-    use bao_tree::io::outboard::PreOrderMemOutboard;
+    use bao_tree::{io::outboard::PreOrderMemOutboard, Blake3Hasher, Hasher};
     use irpc::RpcMessage;
     use n0_future::stream;
     use testresult::TestResult;
@@ -546,10 +546,13 @@ mod tests {
             .map(move |i| data.slice(i..std::cmp::min(i + chunk_size, data.len())))
     }
 
-    async fn test_import_byte_stream_task(data: Bytes, options: Arc<Options>) -> TestResult<()> {
+    async fn test_import_byte_stream_task<H: Hasher>(
+        data: Bytes,
+        options: Arc<Options>,
+    ) -> TestResult<()> {
         let stream: BoxedByteStream =
             Box::pin(stream::iter(chunk_bytes(data.clone(), 999).map(Ok)));
-        let expected_outboard = PreOrderMemOutboard::create(data.as_ref(), IROH_BLOCK_SIZE);
+        let expected_outboard = PreOrderMemOutboard::create::<H>(data.as_ref(), IROH_BLOCK_SIZE);
         // make the channel absurdly large, so we don't have to drain it
         let (mut tx, rx) = mpsc::channel(1024 * 1024);
         let data = stream.collect::<Vec<_>>().await;
@@ -559,7 +562,7 @@ mod tests {
             scope: Default::default(),
         };
         let stream = stream::iter(data.into_iter().map(Ok));
-        let res = import_byte_stream_impl(cmd, &mut tx, stream, options).await;
+        let res = import_byte_stream_impl::<H>(cmd, &mut tx, stream, options).await;
         let Ok(res) = res else {
             panic!("import failed");
         };
@@ -575,10 +578,13 @@ mod tests {
         Ok(())
     }
 
-    async fn test_import_file_task(data: Bytes, options: Arc<Options>) -> TestResult<()> {
+    async fn test_import_file_task<H: Hasher>(
+        data: Bytes,
+        options: Arc<Options>,
+    ) -> TestResult<()> {
         let path = options.path.temp_file_name();
         std::fs::write(&path, &data)?;
-        let expected_outboard = PreOrderMemOutboard::create(data.as_ref(), IROH_BLOCK_SIZE);
+        let expected_outboard = PreOrderMemOutboard::create::<H>(data.as_ref(), IROH_BLOCK_SIZE);
         // make the channel absurdly large, so we don't have to drain it
         let (mut tx, rx) = mpsc::channel(1024 * 1024);
         let cmd = ImportPathRequest {
@@ -587,7 +593,7 @@ mod tests {
             format: BlobFormat::Raw,
             scope: Scope::default(),
         };
-        let res = import_path_impl(cmd, &mut tx, options).await;
+        let res = import_path_impl::<H>(cmd, &mut tx, options).await;
         let Ok(res) = res else {
             panic!("import failed");
         };
@@ -629,8 +635,8 @@ mod tests {
         ];
         for size in sizes {
             let data = Bytes::from(vec![0; size]);
-            test_import_byte_stream_task(data.clone(), options.clone()).await?;
-            test_import_file_task(data, options.clone()).await?;
+            test_import_byte_stream_task::<Blake3Hasher>(data.clone(), options.clone()).await?;
+            test_import_file_task::<Blake3Hasher>(data, options.clone()).await?;
         }
         Ok(())
     }

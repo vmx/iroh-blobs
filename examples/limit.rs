@@ -19,6 +19,7 @@ use std::{
 };
 
 use anyhow::Result;
+use bao_tree::{Blake3Hasher, Hasher};
 use clap::Parser;
 use common::setup_logging;
 use iroh::{protocol::Router, NodeAddr, NodeId, SecretKey, Watcher};
@@ -235,9 +236,10 @@ async fn main() -> Result<()> {
             let connection = endpoint
                 .connect(ticket.node_addr().clone(), iroh_blobs::ALPN)
                 .await?;
-            let (data, stats) = iroh_blobs::get::request::get_blob(connection, ticket.hash())
-                .bytes_and_stats()
-                .await?;
+            let (data, stats) =
+                iroh_blobs::get::request::get_blob::<Blake3Hasher>(connection, ticket.hash())
+                    .bytes_and_stats()
+                    .await?;
             println!("Downloaded {} bytes", data.len());
             println!("Stats: {stats:?}");
         }
@@ -258,10 +260,10 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let store = MemStore::new();
-            let hashes = add_paths(&store, paths).await?;
+            let store = MemStore::<Blake3Hasher>::new();
+            let hashes = add_paths::<Blake3Hasher>(&store, paths).await?;
             let events = limit_by_node_id(allowed_nodes.clone());
-            let (router, addr) = setup(store, events).await?;
+            let (router, addr) = setup::<Blake3Hasher>(store, events).await?;
 
             for (path, hash) in hashes {
                 let ticket = BlobTicket::new(addr.clone(), hash, BlobFormat::Raw);
@@ -277,7 +279,7 @@ async fn main() -> Result<()> {
             router.shutdown().await?;
         }
         Args::ByHash { paths } => {
-            let store = MemStore::new();
+            let store = MemStore::<Blake3Hasher>::new();
 
             let mut hashes = HashMap::new();
             let mut allowed_hashes = HashSet::new();
@@ -290,7 +292,7 @@ async fn main() -> Result<()> {
             }
 
             let events = limit_by_hash(allowed_hashes.clone());
-            let (router, addr) = setup(store, events).await?;
+            let (router, addr) = setup::<Blake3Hasher>(store, events).await?;
 
             for (path, hash) in hashes.iter() {
                 let ticket = BlobTicket::new(addr.clone(), *hash, BlobFormat::Raw);
@@ -306,9 +308,9 @@ async fn main() -> Result<()> {
         }
         Args::Throttle { paths, delay_ms } => {
             let store = MemStore::new();
-            let hashes = add_paths(&store, paths).await?;
+            let hashes = add_paths::<Blake3Hasher>(&store, paths).await?;
             let events = throttle(delay_ms);
-            let (router, addr) = setup(store, events).await?;
+            let (router, addr) = setup::<Blake3Hasher>(store, events).await?;
             for (path, hash) in hashes {
                 let ticket = BlobTicket::new(addr.clone(), hash, BlobFormat::Raw);
                 println!("{}: {ticket}", path.display());
@@ -321,9 +323,9 @@ async fn main() -> Result<()> {
             max_connections,
         } => {
             let store = MemStore::new();
-            let hashes = add_paths(&store, paths).await?;
+            let hashes = add_paths::<Blake3Hasher>(&store, paths).await?;
             let events = limit_max_connections(max_connections);
-            let (router, addr) = setup(store, events).await?;
+            let (router, addr) = setup::<Blake3Hasher>(store, events).await?;
             for (path, hash) in hashes {
                 let ticket = BlobTicket::new(addr.clone(), hash, BlobFormat::Raw);
                 println!("{}: {ticket}", path.display());
@@ -335,7 +337,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn add_paths(store: &MemStore, paths: Vec<PathBuf>) -> Result<HashMap<PathBuf, Hash>> {
+async fn add_paths<H: Hasher>(
+    store: &MemStore<H>,
+    paths: Vec<PathBuf>,
+) -> Result<HashMap<PathBuf, Hash>> {
     let mut hashes = HashMap::new();
     for path in paths {
         let tag = store.add_path(&path).await?;
@@ -344,7 +349,10 @@ async fn add_paths(store: &MemStore, paths: Vec<PathBuf>) -> Result<HashMap<Path
     Ok(hashes)
 }
 
-async fn setup(store: MemStore, events: EventSender) -> Result<(Router, NodeAddr)> {
+async fn setup<H: Hasher + 'static>(
+    store: MemStore<H>,
+    events: EventSender,
+) -> Result<(Router, NodeAddr)> {
     let secret = get_or_generate_secret_key()?;
     let endpoint = iroh::Endpoint::builder()
         .discovery_n0()
@@ -353,7 +361,7 @@ async fn setup(store: MemStore, events: EventSender) -> Result<(Router, NodeAddr
         .await?;
     let _ = endpoint.home_relay().initialized().await;
     let addr = endpoint.node_addr().initialized().await;
-    let blobs = BlobsProtocol::new(&store, endpoint.clone(), Some(events));
+    let blobs = BlobsProtocol::<H>::new(&store, endpoint.clone(), Some(events));
     let router = Router::builder(endpoint)
         .accept(iroh_blobs::ALPN, blobs)
         .spawn();

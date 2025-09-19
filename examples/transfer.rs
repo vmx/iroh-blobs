@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use bao_tree::Blake3Hasher;
 use iroh::{protocol::Router, Endpoint};
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
 
@@ -10,9 +11,9 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = Endpoint::builder().discovery_n0().bind().await?;
 
     // We initialize an in-memory backing store for iroh-blobs
-    let store = MemStore::new();
+    let store = MemStore::<Blake3Hasher>::new();
     // Then we initialize a struct that can accept blobs requests over iroh connections
-    let blobs = BlobsProtocol::new(&store, endpoint.clone(), None);
+    let blobs = BlobsProtocol::<Blake3Hasher>::new(&store, endpoint.clone(), None);
 
     // Grab all passed in arguments, the first one is the binary itself, so we skip it.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -58,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
             // For receiving files, we create a "downloader" that allows us to fetch files
             // from other nodes via iroh connections
-            let downloader = store.downloader(&endpoint);
+            let downloader = store.downloader::<Blake3Hasher>(&endpoint);
 
             println!("Starting download.");
 

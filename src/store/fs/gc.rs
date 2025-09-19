@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{api::Store, Hash, HashAndFormat};
 
-/// An event related to GC
+// An event related to GC
 #[derive(Debug)]
 pub enum GcMarkEvent {
     /// A custom event (info)
@@ -18,7 +18,7 @@ pub enum GcMarkEvent {
     Error(crate::api::Error),
 }
 
-/// An event related to GC
+// An event related to GC
 #[derive(Debug)]
 pub enum GcSweepEvent {
     /// A custom event (debug)
@@ -245,7 +245,7 @@ mod tests {
         path::Path,
     };
 
-    use bao_tree::{io::EncodeError, ChunkNum};
+    use bao_tree::{io::EncodeError, Blake3Hasher, ChunkNum, Hasher};
     use range_collections::RangeSet2;
     use testresult::TestResult;
 
@@ -318,7 +318,7 @@ mod tests {
         Ok(())
     }
 
-    async fn gc_file_delete(path: &Path, store: &Store) -> TestResult<()> {
+    async fn gc_file_delete<H: Hasher>(path: &Path, store: &Store) -> TestResult<()> {
         let mut live = HashSet::new();
         let options = PathOptions::new(&path.join("db"));
         // create a large complete file and check that the data and outboard files are deleted by gc
@@ -345,8 +345,8 @@ mod tests {
         {
             let data = vec![1u8; 8000000];
             let ranges = ChunkRanges::from(..ChunkNum(19));
-            let (bh, b_bao) = create_n0_bao(&data, &ranges)?;
-            store.import_bao_bytes(bh, ranges, b_bao).await?;
+            let (bh, b_bao) = create_n0_bao::<H>(&data, &ranges)?;
+            store.import_bao_bytes::<H>(bh, ranges, b_bao).await?;
             let data_path = options.data_path(&bh);
             let outboard_path = options.outboard_path(&bh);
             let sizes_path = options.sizes_path(&bh);
@@ -370,16 +370,16 @@ mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_path = testdir.path().join("db");
-        let store = crate::store::fs::FsStore::load(&db_path).await?;
+        let store = crate::store::fs::FsStore::load::<Blake3Hasher>(&db_path).await?;
         gc_smoke(&store).await?;
-        gc_file_delete(testdir.path(), &store).await?;
+        gc_file_delete::<Blake3Hasher>(testdir.path(), &store).await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn gc_smoke_mem() -> TestResult {
         tracing_subscriber::fmt::try_init().ok();
-        let store = crate::store::mem::MemStore::new();
+        let store = crate::store::mem::MemStore::<Blake3Hasher>::new();
         gc_smoke(&store).await?;
         Ok(())
     }
@@ -389,14 +389,14 @@ mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_path = testdir.path().join("db");
-        let store = crate::store::fs::FsStore::load(&db_path).await?;
+        let store = crate::store::fs::FsStore::load::<Blake3Hasher>(&db_path).await?;
         gc_check_deletion(&store).await
     }
 
     #[tokio::test]
     async fn gc_check_deletion_mem() -> TestResult {
         tracing_subscriber::fmt::try_init().ok();
-        let store = crate::store::mem::MemStore::default();
+        let store = crate::store::mem::MemStore::<Blake3Hasher>::default();
         gc_check_deletion(&store).await
     }
 

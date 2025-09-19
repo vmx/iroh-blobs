@@ -178,9 +178,13 @@ impl PartialFileStorage {
                     root: bao_tree::Hash::from(*hash),
                 };
                 let mut ranges = ChunkRanges::empty();
-                for range in bao_tree::io::sync::valid_ranges::<_, _, H>(outboard, &data, &ChunkRanges::all())
-                    .into_iter()
-                    .flatten()
+                for range in bao_tree::io::sync::valid_ranges::<_, _, H>(
+                    outboard,
+                    &data,
+                    &ChunkRanges::all(),
+                )
+                .into_iter()
+                .flatten()
                 {
                     ranges |= ChunkRanges::from(range);
                 }
@@ -572,7 +576,10 @@ impl ReadAt for OutboardReader {
 }
 
 impl BaoFileStorage {
-    pub async fn open<H: Hasher>(state: Option<EntryState<Bytes>>, ctx: &HashContext) -> io::Result<Self> {
+    pub async fn open<H: Hasher>(
+        state: Option<EntryState<Bytes>>,
+        ctx: &HashContext,
+    ) -> io::Result<Self> {
         let hash = &ctx.id;
         let options = &ctx.global.options;
         Ok(match state {

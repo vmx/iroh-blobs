@@ -174,7 +174,10 @@ pub async fn get_unverified_size(connection: &Connection, hash: &Hash) -> GetRes
 ///
 /// This asks for the last chunk of the blob and validates the response.
 /// Note that this does not validate that the peer has all the data.
-pub async fn get_verified_size<H: Hasher>(connection: &Connection, hash: &Hash) -> GetResult<(u64, Stats)> {
+pub async fn get_verified_size<H: Hasher>(
+    connection: &Connection,
+    hash: &Hash,
+) -> GetResult<(u64, Stats)> {
     tracing::trace!("Getting verified size of {}", hash.to_hex());
     let request = GetRequest::new(
         *hash,

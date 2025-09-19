@@ -79,7 +79,10 @@ impl Actor {
         }
     }
 
-    async fn handle_command<H: Hasher + 'static>(&mut self, cmd: Command) -> Option<irpc::channel::oneshot::Sender<()>> {
+    async fn handle_command<H: Hasher + 'static>(
+        &mut self,
+        cmd: Command,
+    ) -> Option<irpc::channel::oneshot::Sender<()>> {
         match cmd {
             Command::ImportBao(ImportBaoMsg { tx, .. }) => {
                 tx.send(Err(api::Error::Io(io::Error::other(

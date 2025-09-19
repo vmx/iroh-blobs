@@ -169,13 +169,14 @@ impl<'de> Deserialize<'de> for BlobTicket {
 mod tests {
     use std::net::SocketAddr;
 
+    use bao_tree::{Blake3Hasher, Hasher};
     use iroh::{PublicKey, SecretKey};
     use iroh_test::{assert_eq_hex, hexdump::parse_hexdump};
 
     use super::*;
 
-    fn make_ticket() -> BlobTicket {
-        let hash = Hash::new(b"hi there");
+    fn make_ticket<H: Hasher>() -> BlobTicket {
+        let hash = Hash::new::<H>(b"hi there");
         let peer = SecretKey::generate(rand::thread_rng()).public();
         let addr = SocketAddr::from_str("127.0.0.1:1234").unwrap();
         let relay_url = None;
@@ -188,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_ticket_postcard() {
-        let ticket = make_ticket();
+        let ticket = make_ticket::<Blake3Hasher>();
         let bytes = postcard::to_stdvec(&ticket).unwrap();
         let ticket2: BlobTicket = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(ticket2, ticket);
@@ -196,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_ticket_json() {
-        let ticket = make_ticket();
+        let ticket = make_ticket::<Blake3Hasher>();
         let json = serde_json::to_string(&ticket).unwrap();
         let ticket2: BlobTicket = serde_json::from_str(&json).unwrap();
         assert_eq!(ticket2, ticket);

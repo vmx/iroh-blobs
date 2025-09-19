@@ -4,6 +4,7 @@ use std::{
     ops::Deref,
 };
 
+use bao_tree::{Blake3Hasher, Hasher};
 use iroh_blobs::{
     api::{
         self,
@@ -21,99 +22,100 @@ async fn to_vec<T>(stream: impl Stream<Item = api::Result<T>>) -> api::Result<Ve
     res.into_iter().collect::<api::Result<Vec<_>>>()
 }
 
-fn expected(tags: impl IntoIterator<Item = &'static str>) -> Vec<TagInfo> {
+fn expected<H: Hasher>(tags: impl IntoIterator<Item = &'static str>) -> Vec<TagInfo> {
     tags.into_iter()
-        .map(|tag| TagInfo::new(tag, Hash::new(tag)))
+        .map(|tag| TagInfo::new(tag, Hash::new::<H>(tag)))
         .collect()
 }
 
-async fn set(tags: &Tags, names: impl IntoIterator<Item = &str>) -> TestResult<()> {
+async fn set<H: Hasher>(tags: &Tags, names: impl IntoIterator<Item = &str>) -> TestResult<()> {
     for name in names {
-        tags.set(name, Hash::new(name)).await?;
+        tags.set(name, Hash::new::<H>(name)).await?;
     }
     Ok(())
 }
 
-async fn tags_smoke(tags: &Tags) -> TestResult<()> {
-    set(tags, ["a", "b", "c", "d", "e"]).await?;
+async fn tags_smoke<H: Hasher>(tags: &Tags) -> TestResult<()> {
+    set::<H>(tags, ["a", "b", "c", "d", "e"]).await?;
     let stream = tags.list().await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["a", "b", "c", "d", "e"]));
+    assert_eq!(res, expected::<H>(["a", "b", "c", "d", "e"]));
 
     let stream = tags.list_range("b".."d").await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["b", "c"]));
+    assert_eq!(res, expected::<H>(["b", "c"]));
 
     let stream = tags.list_range("b"..).await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["b", "c", "d", "e"]));
+    assert_eq!(res, expected::<H>(["b", "c", "d", "e"]));
 
     let stream = tags.list_range(.."d").await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["a", "b", "c"]));
+    assert_eq!(res, expected::<H>(["a", "b", "c"]));
 
     let stream = tags.list_range(..="d").await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["a", "b", "c", "d"]));
+    assert_eq!(res, expected::<H>(["a", "b", "c", "d"]));
 
     tags.delete_range("b"..).await?;
     let stream = tags.list().await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["a"]));
+    assert_eq!(res, expected::<H>(["a"]));
 
     tags.delete_range(..="a").await?;
     let stream = tags.list().await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected([]));
+    assert_eq!(res, expected::<H>([]));
 
-    set(tags, ["a", "aa", "aaa", "aab", "b"]).await?;
+    set::<H>(tags, ["a", "aa", "aaa", "aab", "b"]).await?;
 
     let stream = tags.list_prefix("aa").await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["aa", "aaa", "aab"]));
+    assert_eq!(res, expected::<H>(["aa", "aaa", "aab"]));
 
     tags.delete_prefix("aa").await?;
     let stream = tags.list().await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["a", "b"]));
+    assert_eq!(res, expected::<H>(["a", "b"]));
 
     tags.delete_prefix("").await?;
     let stream = tags.list().await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected([]));
+    assert_eq!(res, expected::<H>([]));
 
-    set(tags, ["a", "b", "c"]).await?;
+    set::<H>(tags, ["a", "b", "c"]).await?;
 
     assert_eq!(
         tags.get("b").await?,
-        Some(TagInfo::new("b", Hash::new("b")))
+        Some(TagInfo::new("b", Hash::new::<H>("b")))
     );
 
     tags.delete("b").await?;
     let stream = tags.list().await?;
     let res = to_vec(stream).await?;
-    assert_eq!(res, expected(["a", "c"]));
+    assert_eq!(res, expected::<H>(["a", "c"]));
 
     assert_eq!(tags.get("b").await?, None);
 
     tags.delete_all().await?;
 
-    tags.set("a", HashAndFormat::hash_seq(Hash::new("a")))
+    tags.set("a", HashAndFormat::hash_seq(Hash::new::<H>("a")))
         .await?;
-    tags.set("b", HashAndFormat::raw(Hash::new("b"))).await?;
+    tags.set("b", HashAndFormat::raw(Hash::new::<H>("b")))
+        .await?;
     let stream = tags.list_hash_seq().await?;
     let res = to_vec(stream).await?;
     assert_eq!(
         res,
         vec![TagInfo {
             name: "a".into(),
-            hash: Hash::new("a"),
+            hash: Hash::new::<H>("a"),
             format: BlobFormat::HashSeq,
         }]
     );
 
     tags.delete_all().await?;
-    set(tags, ["c"]).await?;
+    set::<H>(tags, ["c"]).await?;
     tags.rename("c", "f").await?;
     let stream = tags.list().await?;
     let res = to_vec(stream).await?;
@@ -121,7 +123,7 @@ async fn tags_smoke(tags: &Tags) -> TestResult<()> {
         res,
         vec![TagInfo {
             name: "f".into(),
-            hash: Hash::new("c"),
+            hash: Hash::new::<H>("c"),
             format: BlobFormat::Raw,
         }]
     );
@@ -134,16 +136,16 @@ async fn tags_smoke(tags: &Tags) -> TestResult<()> {
 #[tokio::test]
 async fn tags_smoke_mem() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let store = MemStore::new();
-    tags_smoke(store.tags()).await
+    let store = MemStore::<Blake3Hasher>::new();
+    tags_smoke::<Blake3Hasher>(store.tags()).await
 }
 
 #[tokio::test]
 async fn tags_smoke_fs() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
     let td = tempfile::tempdir()?;
-    let store = FsStore::load(td.path().join("a")).await?;
-    tags_smoke(store.tags()).await
+    let store = FsStore::load::<Blake3Hasher>(td.path().join("a")).await?;
+    tags_smoke::<Blake3Hasher>(store.tags()).await
 }
 
 #[tokio::test]
@@ -153,10 +155,10 @@ async fn tags_smoke_fs_rpc() -> TestResult<()> {
     let (server, cert) = irpc::util::make_server_endpoint(unspecified)?;
     let client = irpc::util::make_client_endpoint(unspecified, &[cert.as_ref()])?;
     let td = tempfile::tempdir()?;
-    let store = FsStore::load(td.path().join("a")).await?;
+    let store = FsStore::load::<Blake3Hasher>(td.path().join("a")).await?;
     tokio::spawn(store.deref().clone().listen(server.clone()));
     let api = Store::connect(client, server.local_addr()?);
-    tags_smoke(api.tags()).await?;
+    tags_smoke::<Blake3Hasher>(api.tags()).await?;
     api.shutdown().await?;
     Ok(())
 }

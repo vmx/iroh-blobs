@@ -1,6 +1,6 @@
 use std::{collections::HashSet, io, ops::Range, path::PathBuf};
 
-use bao_tree::ChunkRanges;
+use bao_tree::{Blake3Hasher, ChunkRanges, Hasher};
 use bytes::Bytes;
 use iroh::{protocol::Router, Endpoint, NodeId, Watcher};
 use irpc::RpcMessage;
@@ -215,7 +215,7 @@ async fn drain<T: RpcMessage>(mut rx: mpsc::Receiver<T>) -> Vec<T> {
     items
 }
 
-async fn two_nodes_get_blobs(
+async fn two_nodes_get_blobs<H: Hasher>(
     r1: Router,
     store1: &Store,
     r2: Router,
@@ -229,8 +229,8 @@ async fn two_nodes_get_blobs(
     let addr1 = r1.endpoint().node_addr().initialized().await;
     let conn = r2.endpoint().connect(addr1, crate::ALPN).await?;
     for size in sizes {
-        let hash = Hash::new(test_data(size));
-        store2.remote().fetch(conn.clone(), hash).await?;
+        let hash = Hash::new::<H>(test_data(size));
+        store2.remote().fetch::<H>(conn.clone(), hash).await?;
         let actual = store2.get_bytes(hash).await?;
         assert_eq!(actual, test_data(size));
     }
@@ -240,17 +240,18 @@ async fn two_nodes_get_blobs(
 
 #[tokio::test]
 async fn two_nodes_get_blobs_fs() -> TestResult<()> {
-    let (_testdir, (r1, store1, _), (r2, store2, _)) = two_node_test_setup_fs().await?;
-    two_nodes_get_blobs(r1, &store1, r2, &store2).await
+    let (_testdir, (r1, store1, _), (r2, store2, _)) =
+        two_node_test_setup_fs::<Blake3Hasher>().await?;
+    two_nodes_get_blobs::<Blake3Hasher>(r1, &store1, r2, &store2).await
 }
 
 #[tokio::test]
 async fn two_nodes_get_blobs_mem() -> TestResult<()> {
-    let ((r1, store1), (r2, store2)) = two_node_test_setup_mem().await?;
-    two_nodes_get_blobs(r1, &store1, r2, &store2).await
+    let ((r1, store1), (r2, store2)) = two_node_test_setup_mem::<Blake3Hasher>().await?;
+    two_nodes_get_blobs::<Blake3Hasher>(r1, &store1, r2, &store2).await
 }
 
-async fn two_nodes_observe(
+async fn two_nodes_observe<H: Hasher>(
     r1: Router,
     store1: &Store,
     r2: Router,
@@ -258,7 +259,7 @@ async fn two_nodes_observe(
 ) -> TestResult<()> {
     let size = 1024 * 1024 * 8 + 1;
     let data = test_data(size);
-    let (hash, bao) = create_n0_bao(&data, &ChunkRanges::all())?;
+    let (hash, bao) = create_n0_bao::<H>(&data, &ChunkRanges::all())?;
     let addr1 = r1.endpoint().node_addr().initialized().await;
     let conn = r2.endpoint().connect(addr1, crate::ALPN).await?;
     let mut stream = store2
@@ -275,7 +276,7 @@ async fn two_nodes_observe(
         io::Result::Ok(())
     });
     store1
-        .import_bao_bytes(hash, ChunkRanges::all(), bao)
+        .import_bao_bytes::<H>(hash, ChunkRanges::all(), bao)
         .await?;
     remote_observe_task.await??;
     tokio::try_join!(r1.shutdown(), r2.shutdown())?;
@@ -285,18 +286,19 @@ async fn two_nodes_observe(
 #[tokio::test]
 async fn two_nodes_observe_fs() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let (_testdir, (r1, store1, _), (r2, store2, _)) = two_node_test_setup_fs().await?;
-    two_nodes_observe(r1, &store1, r2, &store2).await
+    let (_testdir, (r1, store1, _), (r2, store2, _)) =
+        two_node_test_setup_fs::<Blake3Hasher>().await?;
+    two_nodes_observe::<Blake3Hasher>(r1, &store1, r2, &store2).await
 }
 
 #[tokio::test]
 async fn two_nodes_observe_mem() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let ((r1, store1), (r2, store2)) = two_node_test_setup_mem().await?;
-    two_nodes_observe(r1, &store1, r2, &store2).await
+    let ((r1, store1), (r2, store2)) = two_node_test_setup_mem::<Blake3Hasher>().await?;
+    two_nodes_observe::<Blake3Hasher>(r1, &store1, r2, &store2).await
 }
 
-async fn two_nodes_get_many(
+async fn two_nodes_get_many<H: Hasher>(
     r1: Router,
     store1: &Store,
     r2: Router,
@@ -312,11 +314,11 @@ async fn two_nodes_get_many(
     let conn = r2.endpoint().connect(addr1, crate::ALPN).await?;
     store2
         .remote()
-        .execute_get_many(conn, GetManyRequest::new(hashes, ChunkRangesSeq::all()))
+        .execute_get_many::<H>(conn, GetManyRequest::new(hashes, ChunkRangesSeq::all()))
         .await?;
     for size in sizes {
         let expected = test_data(size);
-        let hash = Hash::new(&expected);
+        let hash = Hash::new::<H>(&expected);
         let actual = store2.get_bytes(hash).await?;
         assert_eq!(actual, expected);
     }
@@ -327,15 +329,16 @@ async fn two_nodes_get_many(
 #[tokio::test]
 async fn two_nodes_get_many_fs() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let (_testdir, (r1, store1, _), (r2, store2, _)) = two_node_test_setup_fs().await?;
-    two_nodes_get_many(r1, &store1, r2, &store2).await
+    let (_testdir, (r1, store1, _), (r2, store2, _)) =
+        two_node_test_setup_fs::<Blake3Hasher>().await?;
+    two_nodes_get_many::<Blake3Hasher>(r1, &store1, r2, &store2).await
 }
 
 #[tokio::test]
 async fn two_nodes_get_many_mem() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let ((r1, store1), (r2, store2)) = two_node_test_setup_mem().await?;
-    two_nodes_get_many(r1, &store1, r2, &store2).await
+    let ((r1, store1), (r2, store2)) = two_node_test_setup_mem::<Blake3Hasher>().await?;
+    two_nodes_get_many::<Blake3Hasher>(r1, &store1, r2, &store2).await
 }
 
 fn event_handler(
@@ -373,7 +376,7 @@ fn event_handler(
     (events_tx, count_rx, task)
 }
 
-async fn two_nodes_push_blobs(
+async fn two_nodes_push_blobs<H: Hasher>(
     r1: Router,
     store1: &Store,
     r2: Router,
@@ -388,7 +391,7 @@ async fn two_nodes_push_blobs(
     let addr2 = r2.endpoint().node_addr().initialized().await;
     let conn = r1.endpoint().connect(addr2, crate::ALPN).await?;
     for size in sizes {
-        let hash = Hash::new(test_data(size));
+        let hash = Hash::new::<H>(test_data(size));
         // let data = get::request::get_blob(conn.clone(), hash).bytes().await?;
         store1
             .remote()
@@ -410,20 +413,20 @@ async fn two_nodes_push_blobs(
 async fn two_nodes_push_blobs_fs() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
     let testdir = tempfile::tempdir()?;
-    let (r1, store1, _) = node_test_setup_fs(testdir.path().join("a")).await?;
+    let (r1, store1, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("a")).await?;
     let (events_tx, count_rx, _task) = event_handler([r1.endpoint().node_id()]);
     let (r2, store2, _) =
-        node_test_setup_with_events_fs(testdir.path().join("b"), events_tx).await?;
-    two_nodes_push_blobs(r1, &store1, r2, &store2, count_rx).await
+        node_test_setup_with_events_fs::<Blake3Hasher>(testdir.path().join("b"), events_tx).await?;
+    two_nodes_push_blobs::<Blake3Hasher>(r1, &store1, r2, &store2, count_rx).await
 }
 
 #[tokio::test]
 async fn two_nodes_push_blobs_mem() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let (r1, store1) = node_test_setup_mem().await?;
+    let (r1, store1) = node_test_setup_mem::<Blake3Hasher>().await?;
     let (events_tx, count_rx, _task) = event_handler([r1.endpoint().node_id()]);
-    let (r2, store2) = node_test_setup_with_events_mem(events_tx).await?;
-    two_nodes_push_blobs(r1, &store1, r2, &store2, count_rx).await
+    let (r2, store2) = node_test_setup_with_events_mem::<Blake3Hasher>(events_tx).await?;
+    two_nodes_push_blobs::<Blake3Hasher>(r1, &store1, r2, &store2, count_rx).await
 }
 
 pub async fn add_test_hash_seq(
@@ -443,7 +446,7 @@ pub async fn add_test_hash_seq(
     Ok(root)
 }
 
-pub async fn add_test_hash_seq_incomplete(
+pub async fn add_test_hash_seq_incomplete<H: Hasher>(
     blobs: &Store,
     sizes: impl IntoIterator<Item = usize>,
     present: impl Fn(usize) -> ChunkRanges,
@@ -454,27 +457,27 @@ pub async fn add_test_hash_seq_incomplete(
         let data = test_data(size);
         // figure out the ranges to import, and manually create a temp tag.
         let ranges = present(i + 1);
-        let (hash, bao) = create_n0_bao(&data, &ranges)?;
+        let (hash, bao) = create_n0_bao::<H>(&data, &ranges)?;
         // why isn't import_bao_bytes returning a temp tag anyway?
         tts.push(batch.temp_tag(hash).await?);
         if !ranges.is_empty() {
-            blobs.import_bao_bytes(hash, ranges, bao).await?;
+            blobs.import_bao_bytes::<H>(hash, ranges, bao).await?;
         }
     }
     let hash_seq = tts.iter().map(|tt| *tt.hash()).collect::<HashSeq>();
     let hash_seq_bytes = Bytes::from(hash_seq);
     let ranges = present(0);
-    let (root, bao) = create_n0_bao(&hash_seq_bytes, &ranges)?;
+    let (root, bao) = create_n0_bao::<H>(&hash_seq_bytes, &ranges)?;
     let content = HashAndFormat::hash_seq(root);
     blobs.tags().create(content).await?;
-    blobs.import_bao_bytes(root, ranges, bao).await?;
+    blobs.import_bao_bytes::<H>(root, ranges, bao).await?;
     Ok(content)
 }
 
-async fn check_presence(store: &Store, sizes: &[usize]) -> TestResult<()> {
+async fn check_presence<H: Hasher>(store: &Store, sizes: &[usize]) -> TestResult<()> {
     for size in sizes {
         let expected = test_data(*size);
-        let hash = Hash::new(&expected);
+        let hash = Hash::new::<H>(&expected);
         let actual = store
             .export_bao(hash, ChunkRanges::all())
             .data_to_bytes()
@@ -484,31 +487,33 @@ async fn check_presence(store: &Store, sizes: &[usize]) -> TestResult<()> {
     Ok(())
 }
 
-pub async fn node_test_setup_fs(db_path: PathBuf) -> TestResult<(Router, FsStore, PathBuf)> {
-    node_test_setup_with_events_fs(db_path, EventSender::DEFAULT).await
+pub async fn node_test_setup_fs<H: Hasher + 'static>(
+    db_path: PathBuf,
+) -> TestResult<(Router, FsStore, PathBuf)> {
+    node_test_setup_with_events_fs::<H>(db_path, EventSender::DEFAULT).await
 }
 
-pub async fn node_test_setup_with_events_fs(
+pub async fn node_test_setup_with_events_fs<H: Hasher + 'static>(
     db_path: PathBuf,
     events: EventSender,
 ) -> TestResult<(Router, FsStore, PathBuf)> {
-    let store = crate::store::fs::FsStore::load(&db_path).await?;
+    let store = crate::store::fs::FsStore::load::<H>(&db_path).await?;
     let ep = Endpoint::builder().bind().await?;
-    let blobs = BlobsProtocol::new(&store, ep.clone(), Some(events));
+    let blobs = BlobsProtocol::<H>::new(&store, ep.clone(), Some(events));
     let router = Router::builder(ep).accept(crate::ALPN, blobs).spawn();
     Ok((router, store, db_path))
 }
 
-pub async fn node_test_setup_mem() -> TestResult<(Router, MemStore)> {
+pub async fn node_test_setup_mem<H: Hasher + 'static>() -> TestResult<(Router, MemStore<H>)> {
     node_test_setup_with_events_mem(EventSender::DEFAULT).await
 }
 
-pub async fn node_test_setup_with_events_mem(
+pub async fn node_test_setup_with_events_mem<H: Hasher + 'static>(
     events: EventSender,
-) -> TestResult<(Router, MemStore)> {
-    let store = MemStore::new();
+) -> TestResult<(Router, MemStore<H>)> {
+    let store = MemStore::<H>::new();
     let ep = Endpoint::builder().bind().await?;
-    let blobs = BlobsProtocol::new(&store, ep.clone(), Some(events));
+    let blobs = BlobsProtocol::<H>::new(&store, ep.clone(), Some(events));
     let router = Router::builder(ep).accept(crate::ALPN, blobs).spawn();
     Ok((router, store))
 }
@@ -517,7 +522,7 @@ pub async fn node_test_setup_with_events_mem(
 ///
 /// Note that this does not configure discovery, so nodes will only find each other
 /// with full node addresses, not just node ids!
-async fn two_node_test_setup_fs() -> TestResult<(
+async fn two_node_test_setup_fs<H: Hasher + 'static>() -> TestResult<(
     TempDir,
     (Router, FsStore, PathBuf),
     (Router, FsStore, PathBuf),
@@ -527,8 +532,8 @@ async fn two_node_test_setup_fs() -> TestResult<(
     let db2_path = testdir.path().join("db2");
     Ok((
         testdir,
-        node_test_setup_fs(db1_path).await?,
-        node_test_setup_fs(db2_path).await?,
+        node_test_setup_fs::<H>(db1_path).await?,
+        node_test_setup_fs::<H>(db2_path).await?,
     ))
 }
 
@@ -536,11 +541,15 @@ async fn two_node_test_setup_fs() -> TestResult<(
 ///
 /// Note that this does not configure discovery, so nodes will only find each other
 /// with full node addresses, not just node ids!
-async fn two_node_test_setup_mem() -> TestResult<((Router, MemStore), (Router, MemStore))> {
-    Ok((node_test_setup_mem().await?, node_test_setup_mem().await?))
+async fn two_node_test_setup_mem<H: Hasher + 'static>(
+) -> TestResult<((Router, MemStore<H>), (Router, MemStore<H>))> {
+    Ok((
+        node_test_setup_mem::<H>().await?,
+        node_test_setup_mem::<H>().await?,
+    ))
 }
 
-async fn two_nodes_hash_seq(
+async fn two_nodes_hash_seq<H: Hasher>(
     r1: Router,
     store1: &Store,
     r2: Router,
@@ -550,38 +559,40 @@ async fn two_nodes_hash_seq(
     let sizes = INTERESTING_SIZES;
     let root = add_test_hash_seq(store1, sizes).await?;
     let conn = r2.endpoint().connect(addr1, crate::ALPN).await?;
-    store2.remote().fetch(conn, root).await?;
-    check_presence(store2, &sizes).await?;
+    store2.remote().fetch::<H>(conn, root).await?;
+    check_presence::<H>(store2, &sizes).await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn two_nodes_hash_seq_fs() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let (_testdir, (r1, store1, _), (r2, store2, _)) = two_node_test_setup_fs().await?;
-    two_nodes_hash_seq(r1, &store1, r2, &store2).await
+    let (_testdir, (r1, store1, _), (r2, store2, _)) =
+        two_node_test_setup_fs::<Blake3Hasher>().await?;
+    two_nodes_hash_seq::<Blake3Hasher>(r1, &store1, r2, &store2).await
 }
 
 #[tokio::test]
 async fn two_nodes_hash_seq_mem() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let ((r1, store1), (r2, store2)) = two_node_test_setup_mem().await?;
-    two_nodes_hash_seq(r1, &store1, r2, &store2).await
+    let ((r1, store1), (r2, store2)) = two_node_test_setup_mem::<Blake3Hasher>().await?;
+    two_nodes_hash_seq::<Blake3Hasher>(r1, &store1, r2, &store2).await
 }
 
 #[tokio::test]
 async fn two_nodes_hash_seq_progress() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let (_testdir, (r1, store1, _), (r2, store2, _)) = two_node_test_setup_fs().await?;
+    let (_testdir, (r1, store1, _), (r2, store2, _)) =
+        two_node_test_setup_fs::<Blake3Hasher>().await?;
     let addr1 = r1.endpoint().node_addr().initialized().await;
     let sizes = INTERESTING_SIZES;
     let root = add_test_hash_seq(&store1, sizes).await?;
     let conn = r2.endpoint().connect(addr1, crate::ALPN).await?;
-    let mut stream = store2.remote().fetch(conn, root).stream();
+    let mut stream = store2.remote().fetch::<Blake3Hasher>(conn, root).stream();
     while let Some(item) = stream.next().await {
         println!("{item:?}");
     }
-    check_presence(&store2, &sizes).await?;
+    check_presence::<Blake3Hasher>(&store2, &sizes).await?;
     Ok(())
 }
 
@@ -593,7 +604,7 @@ async fn node_serve_hash_seq() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
     let testdir = tempfile::tempdir()?;
     let db_path = testdir.path().join("db");
-    let store = crate::store::fs::FsStore::load(&db_path).await?;
+    let store = crate::store::fs::FsStore::load::<Blake3Hasher>(&db_path).await?;
     let sizes = INTERESTING_SIZES;
     let mut tts = Vec::new();
     // add all the sizes
@@ -605,7 +616,8 @@ async fn node_serve_hash_seq() -> TestResult<()> {
     let root_tt = store.add_bytes(hash_seq).await?;
     let root = root_tt.hash;
     let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-    let blobs = crate::net_protocol::BlobsProtocol::new(&store, endpoint.clone(), None);
+    let blobs =
+        crate::net_protocol::BlobsProtocol::<Blake3Hasher>::new(&store, endpoint.clone(), None);
     let r1 = Router::builder(endpoint)
         .accept(crate::protocol::ALPN, blobs)
         .spawn();
@@ -613,7 +625,8 @@ async fn node_serve_hash_seq() -> TestResult<()> {
     info!("node addr: {addr1:?}");
     let endpoint2 = Endpoint::builder().discovery_n0().bind().await?;
     let conn = endpoint2.connect(addr1, crate::protocol::ALPN).await?;
-    let (hs, sizes) = get::request::get_hash_seq_and_sizes(&conn, &root, 1024, None).await?;
+    let (hs, sizes) =
+        get::request::get_hash_seq_and_sizes::<Blake3Hasher>(&conn, &root, 1024, None).await?;
     println!("hash seq: {hs:?}");
     println!("sizes: {sizes:?}");
     r1.shutdown().await?;
@@ -628,7 +641,7 @@ async fn node_serve_blobs() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
     let testdir = tempfile::tempdir()?;
     let db_path = testdir.path().join("db");
-    let store = crate::store::fs::FsStore::load(&db_path).await?;
+    let store = crate::store::fs::FsStore::load::<Blake3Hasher>(&db_path).await?;
     let sizes = INTERESTING_SIZES;
     // add all the sizes
     let mut tts = Vec::new();
@@ -636,7 +649,8 @@ async fn node_serve_blobs() -> TestResult<()> {
         tts.push(store.add_bytes(test_data(size)).await?);
     }
     let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-    let blobs = crate::net_protocol::BlobsProtocol::new(&store, endpoint.clone(), None);
+    let blobs =
+        crate::net_protocol::BlobsProtocol::<Blake3Hasher>::new(&store, endpoint.clone(), None);
     let r1 = Router::builder(endpoint)
         .accept(crate::protocol::ALPN, blobs)
         .spawn();
@@ -646,12 +660,12 @@ async fn node_serve_blobs() -> TestResult<()> {
     let conn = endpoint2.connect(addr1, crate::protocol::ALPN).await?;
     for size in sizes {
         let expected = test_data(size);
-        let hash = Hash::new(&expected);
-        let mut stream = get::request::get_blob(conn.clone(), hash);
+        let hash = Hash::new::<Blake3Hasher>(&expected);
+        let mut stream = get::request::get_blob::<Blake3Hasher>(conn.clone(), hash);
         while let Some(item) = stream.next().await {
             println!("{item:?}");
         }
-        let actual = get::request::get_blob(conn.clone(), hash).await?;
+        let actual = get::request::get_blob::<Blake3Hasher>(conn.clone(), hash).await?;
         assert_eq!(actual.len(), expected.len(), "size: {size}");
     }
     r1.shutdown().await?;
@@ -663,22 +677,22 @@ async fn node_smoke_fs() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
     let testdir = tempfile::tempdir()?;
     let db_path = testdir.path().join("db");
-    let store = crate::store::fs::FsStore::load(&db_path).await?;
-    node_smoke(&store).await
+    let store = crate::store::fs::FsStore::load::<Blake3Hasher>(&db_path).await?;
+    node_smoke::<Blake3Hasher>(&store).await
 }
 
 #[tokio::test]
 async fn node_smoke_mem() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
-    let store = crate::store::mem::MemStore::new();
-    node_smoke(&store).await
+    let store = crate::store::mem::MemStore::<Blake3Hasher>::new();
+    node_smoke::<Blake3Hasher>(&store).await
 }
 
-async fn node_smoke(store: &Store) -> TestResult<()> {
+async fn node_smoke<H: Hasher + 'static>(store: &Store) -> TestResult<()> {
     let tt = store.add_bytes(b"hello world".to_vec()).temp_tag().await?;
     let hash = *tt.hash();
     let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-    let blobs = crate::net_protocol::BlobsProtocol::new(store, endpoint.clone(), None);
+    let blobs = crate::net_protocol::BlobsProtocol::<H>::new(store, endpoint.clone(), None);
     let r1 = Router::builder(endpoint)
         .accept(crate::protocol::ALPN, blobs)
         .spawn();
@@ -688,7 +702,7 @@ async fn node_smoke(store: &Store) -> TestResult<()> {
     let conn = endpoint2.connect(addr1, crate::protocol::ALPN).await?;
     let (size, stats) = get::request::get_unverified_size(&conn, &hash).await?;
     info!("size: {} stats: {:?}", size, stats);
-    let data = get::request::get_blob(conn, hash).await?;
+    let data = get::request::get_blob::<H>(conn, hash).await?;
     assert_eq!(data.as_ref(), b"hello world");
     r1.shutdown().await?;
     Ok(())
@@ -699,7 +713,7 @@ async fn test_export_chunk() -> TestResult {
     tracing_subscriber::fmt::try_init().ok();
     let testdir = tempfile::tempdir()?;
     let db_path = testdir.path().join("db");
-    let store = crate::store::fs::FsStore::load(&db_path).await?;
+    let store = crate::store::fs::FsStore::load::<Blake3Hasher>(&db_path).await?;
     let blobs = store.blobs();
     for size in [1024 * 18 + 1] {
         let data = vec![0u8; size];
@@ -734,14 +748,14 @@ async fn export_ranges_smoke_fs() -> TestResult {
     tracing_subscriber::fmt::try_init().ok();
     let testdir = tempfile::tempdir()?;
     let db_path = testdir.path().join("db");
-    let store = crate::store::fs::FsStore::load(&db_path).await?;
+    let store = crate::store::fs::FsStore::load::<Blake3Hasher>(&db_path).await?;
     export_ranges_smoke(&store).await
 }
 
 #[tokio::test]
 async fn export_ranges_smoke_mem() -> TestResult {
     tracing_subscriber::fmt::try_init().ok();
-    let store = MemStore::new();
+    let store = MemStore::<Blake3Hasher>::new();
     export_ranges_smoke(&store).await
 }
 

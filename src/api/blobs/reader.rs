@@ -216,7 +216,7 @@ impl tokio::io::AsyncSeek for BlobReader {
 #[cfg(test)]
 #[cfg(feature = "fs-store")]
 mod tests {
-    use bao_tree::ChunkRanges;
+    use bao_tree::{Blake3Hasher, ChunkRanges, Hasher};
     use testresult::TestResult;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -260,13 +260,15 @@ mod tests {
         Ok(())
     }
 
-    async fn reader_partial(blobs: &Blobs) -> TestResult<()> {
+    async fn reader_partial<H: Hasher>(blobs: &Blobs) -> TestResult<()> {
         for size in INTERESTING_SIZES {
             let data = test_data(size);
             let ranges = ChunkRanges::chunk(0);
-            let (hash, bao) = create_n0_bao(&data, &ranges)?;
+            let (hash, bao) = create_n0_bao::<H>(&data, &ranges)?;
             println!("importing {} bytes", bao.len());
-            blobs.import_bao_bytes(hash, ranges.clone(), bao).await?;
+            blobs
+                .import_bao_bytes::<H>(hash, ranges.clone(), bao)
+                .await?;
             // read the first chunk or the entire blob, whatever is smaller
             // this should work!
             {
@@ -306,29 +308,29 @@ mod tests {
     #[tokio::test]
     async fn reader_partial_fs() -> TestResult<()> {
         let testdir = tempfile::tempdir()?;
-        let store = FsStore::load(testdir.path().to_owned()).await?;
-        reader_partial(store.blobs()).await?;
+        let store = FsStore::load::<Blake3Hasher>(testdir.path().to_owned()).await?;
+        reader_partial::<Blake3Hasher>(store.blobs()).await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn reader_partial_memory() -> TestResult<()> {
-        let store = MemStore::new();
-        reader_partial(store.blobs()).await?;
+        let store = MemStore::<Blake3Hasher>::new();
+        reader_partial::<Blake3Hasher>(store.blobs()).await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn reader_smoke_fs() -> TestResult<()> {
         let testdir = tempfile::tempdir()?;
-        let store = FsStore::load(testdir.path().to_owned()).await?;
+        let store = FsStore::load::<Blake3Hasher>(testdir.path().to_owned()).await?;
         reader_smoke(store.blobs()).await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn reader_smoke_memory() -> TestResult<()> {
-        let store = MemStore::new();
+        let store = MemStore::<Blake3Hasher>::new();
         reader_smoke(store.blobs()).await?;
         Ok(())
     }

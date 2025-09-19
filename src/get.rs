@@ -547,7 +547,9 @@ pub mod fsm {
             H: Hasher,
         {
             let (content, _size) = self.next().await?;
-            let res = content.write_all_with_outboard::<_, _, H>(outboard, data).await?;
+            let res = content
+                .write_all_with_outboard::<_, _, H>(outboard, data)
+                .await?;
             Ok(res)
         }
 

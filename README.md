@@ -33,6 +33,7 @@ Iroh provides a [`Router`](https://docs.rs/iroh/latest/iroh/protocol/struct.Rout
 Here is a basic example of how to set up `iroh-blobs` with `iroh`:
 
 ```rust,no_run
+use bao_tree::Blake3Hasher;
 use iroh::{protocol::Router, Endpoint};
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 
@@ -43,8 +44,8 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = Endpoint::builder().discovery_n0().bind().await?;
 
     // create a protocol handler using an in-memory blob store.
-    let store = MemStore::new();
-    let blobs = BlobsProtocol::new(&store, endpoint.clone(), None);
+    let store = MemStore::<Blake3Hasher>::new();
+    let blobs = BlobsProtocol::<Blake3Hasher>::new(&store, endpoint.clone(), None);
 
     // build the router
     let router = Router::builder(endpoint)

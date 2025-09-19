@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Result};
+use bao_tree::{Blake3Hasher, Hasher};
 use clap::{Parser, Subcommand};
 use iroh::{
     discovery::mdns::MdnsDiscovery, protocol::Router, Endpoint, PublicKey, RelayMode, SecretKey,
@@ -50,7 +51,7 @@ pub enum Commands {
     },
 }
 
-async fn accept(path: &Path) -> Result<()> {
+async fn accept<H: Hasher + 'static>(path: &Path) -> Result<()> {
     if !path.is_file() {
         println!("Content must be a file.");
         return Ok(());
@@ -67,8 +68,8 @@ async fn accept(path: &Path) -> Result<()> {
         .bind()
         .await?;
     let builder = Router::builder(endpoint.clone());
-    let store = MemStore::new();
-    let blobs = BlobsProtocol::new(&store, endpoint.clone(), None);
+    let store = MemStore::<H>::new();
+    let blobs = BlobsProtocol::<Blake3Hasher>::new(&store, endpoint.clone(), None);
     let builder = builder.accept(iroh_blobs::ALPN, blobs.clone());
     let node = builder.spawn();
 
@@ -86,7 +87,11 @@ async fn accept(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn connect(node_id: PublicKey, hash: Hash, out: Option<PathBuf>) -> Result<()> {
+async fn connect<H: Hasher + 'static>(
+    node_id: PublicKey,
+    hash: Hash,
+    out: Option<PathBuf>,
+) -> Result<()> {
     let key = SecretKey::generate(rand::rngs::OsRng);
     // todo: disable discovery publishing once https://github.com/n0-computer/iroh/issues/3401 is implemented
     let discovery = MdnsDiscovery::builder();
@@ -99,11 +104,11 @@ async fn connect(node_id: PublicKey, hash: Hash, out: Option<PathBuf>) -> Result
         .relay_mode(RelayMode::Disabled)
         .bind()
         .await?;
-    let store = MemStore::new();
+    let store = MemStore::<H>::new();
 
     println!("NodeID: {}", endpoint.node_id());
     let conn = endpoint.connect(node_id, iroh_blobs::ALPN).await?;
-    let stats = store.remote().fetch(conn, hash).await?;
+    let stats = store.remote().fetch::<H>(conn, hash).await?;
     println!(
         "Fetched {} bytes for hash {}",
         stats.payload_bytes_read, hash
@@ -134,10 +139,10 @@ async fn main() -> anyhow::Result<()> {
 
     match &cli.command {
         Commands::Accept { path } => {
-            accept(path).await?;
+            accept::<Blake3Hasher>(path).await?;
         }
         Commands::Connect { node_id, hash, out } => {
-            connect(*node_id, *hash, out.clone()).await?;
+            connect::<Blake3Hasher>(*node_id, *hash, out.clone()).await?;
         }
     }
     Ok(())

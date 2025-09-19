@@ -459,6 +459,7 @@ impl<'de> Deserialize<'de> for HashAndFormat {
 #[cfg(test)]
 mod tests {
 
+    use bao_tree::{blake3, Blake3Hasher};
     use iroh_test::{assert_eq_hex, hexdump::parse_hexdump};
     use serde_test::{assert_tokens, Configure, Token};
 
@@ -481,7 +482,7 @@ mod tests {
     #[test]
     fn test_hash() {
         let data = b"hello world";
-        let hash = Hash::new(data);
+        let hash = Hash::new::<Blake3Hasher>(data);
 
         let encoded = hash.to_string();
         assert_eq!(encoded.parse::<Hash>().unwrap(), hash);
@@ -489,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_empty_hash() {
-        let hash = Hash::new(b"");
+        let hash = Hash::new::<Blake3Hasher>(b"");
         assert_eq!(hash, Hash::EMPTY);
     }
 
@@ -559,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_hash_serde() {
-        let hash = Hash::new("hello");
+        let hash = Hash::new::<Blake3Hasher>("hello");
 
         // Hashes are serialized as 32 tuples
         let mut tokens = Vec::new();
@@ -580,7 +581,7 @@ mod tests {
 
     #[test]
     fn test_hash_postcard() {
-        let hash = Hash::new("hello");
+        let hash = Hash::new::<Blake3Hasher>("hello");
         let ser = postcard::to_stdvec(&hash).unwrap();
         let de = postcard::from_bytes(&ser).unwrap();
         assert_eq!(hash, de);
@@ -590,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_hash_json() {
-        let hash = Hash::new("hello");
+        let hash = Hash::new::<Blake3Hasher>("hello");
         let ser = serde_json::to_string(&hash).unwrap();
         let de = serde_json::from_str(&ser).unwrap();
         assert_eq!(hash, de);
@@ -600,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_hash_and_format_parse() {
-        let hash = Hash::new("hello");
+        let hash = Hash::new::<Blake3Hasher>("hello");
 
         let expected = HashAndFormat::raw(hash);
         let actual = expected.to_string().parse::<HashAndFormat>().unwrap();
@@ -613,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_hash_and_format_postcard() {
-        let haf = HashAndFormat::raw(Hash::new("hello"));
+        let haf = HashAndFormat::raw(Hash::new::<Blake3Hasher>("hello"));
         let ser = postcard::to_stdvec(&haf).unwrap();
         let de = postcard::from_bytes(&ser).unwrap();
         assert_eq!(haf, de);
@@ -621,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_hash_and_format_json() {
-        let haf = HashAndFormat::raw(Hash::new("hello"));
+        let haf = HashAndFormat::raw(Hash::new::<Blake3Hasher>("hello"));
         let ser = serde_json::to_string(&haf).unwrap();
         let de = serde_json::from_str(&ser).unwrap();
         assert_eq!(haf, de);

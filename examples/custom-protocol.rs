@@ -41,6 +41,7 @@ use std::{
 };
 
 use anyhow::Result;
+use bao_tree::{Blake3Hasher, Hasher};
 use clap::Parser;
 use iroh::{
     discovery::pkarr::PkarrResolver,
@@ -80,12 +81,12 @@ pub enum Command {
 /// and the connection is aborted unless both nodes pass the same bytestring.
 const ALPN: &[u8] = b"iroh-example/text-search/0";
 
-async fn listen(text: Vec<String>) -> Result<()> {
+async fn listen<H: Hasher + 'static>(text: Vec<String>) -> Result<()> {
     // allow the user to provide a secret so we can have a stable node id.
     // This is only needed for the listen side.
     let secret_key = get_or_generate_secret_key()?;
     // Use an in-memory store for this example. You would use a persistent store in production code.
-    let store = MemStore::new();
+    let store = MemStore::<H>::new();
     // Create an endpoint with the secret key and discovery publishing to the n0 dns server enabled.
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
@@ -100,7 +101,7 @@ async fn listen(text: Vec<String>) -> Result<()> {
         proto.insert_and_index(text).await?;
     }
     // Build the iroh-blobs protocol handler, which is used to download blobs.
-    let blobs = BlobsProtocol::new(&store, endpoint.clone(), None);
+    let blobs = BlobsProtocol::<H>::new(&store, endpoint.clone(), None);
 
     // create a router that handles both our custom protocol and the iroh-blobs protocol.
     let node = Router::builder(endpoint)
@@ -118,9 +119,9 @@ async fn listen(text: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-async fn query(node_id: NodeId, query: String) -> Result<()> {
+async fn query<H: Hasher + 'static>(node_id: NodeId, query: String) -> Result<()> {
     // Build a in-memory node. For production code, you'd want a persistent node instead usually.
-    let store = MemStore::new();
+    let store = MemStore::<H>::new();
     // Create an endpoint with a random secret key and no discovery publishing.
     // For a client we just need discovery resolution via the n0 dns server, which
     // the PkarrResolver provides.
@@ -131,7 +132,7 @@ async fn query(node_id: NodeId, query: String) -> Result<()> {
     // Query the remote node.
     // This will send the query over our custom protocol, read hashes on the reply stream,
     // and download each hash over iroh-blobs.
-    let hashes = query_remote(&endpoint, &store, node_id, &query).await?;
+    let hashes = query_remote::<H>(&endpoint, &store, node_id, &query).await?;
 
     // Print out our query results.
     for hash in hashes {
@@ -154,13 +155,13 @@ async fn main() -> Result<()> {
 
     match args.command {
         Command::Listen { text } => {
-            listen(text).await?;
+            listen::<Blake3Hasher>(text).await?;
         }
         Command::Query {
             node_id,
             query: query_text,
         } => {
-            query(node_id, query_text).await?;
+            query::<Blake3Hasher>(node_id, query_text).await?;
         }
     }
 
@@ -266,7 +267,7 @@ impl BlobSearch {
 }
 
 /// Query a remote node, download all matching blobs and print the results.
-pub async fn query_remote(
+pub async fn query_remote<H: Hasher>(
     endpoint: &Endpoint,
     store: &Store,
     node_id: NodeId,
@@ -308,7 +309,7 @@ pub async fn query_remote(
         // Upcast the raw bytes to the `Hash` type.
         let hash = Hash::from_bytes(hash_bytes);
         // Download the content via iroh-blobs.
-        store.remote().fetch(blobs_conn.clone(), hash).await?;
+        store.remote().fetch::<H>(blobs_conn.clone(), hash).await?;
         out.push(hash);
     }
     conn.close(0u32.into(), b"done");

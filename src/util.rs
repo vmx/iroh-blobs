@@ -248,7 +248,8 @@ pub(crate) mod outboard_with_progress {
         let chunk_buf_size = size.min(outboard.tree.block_size().bytes());
         let reader = BufReader::with_capacity(read_buf_size, data);
         let mut buffer = SmallVec::<[u8; 128]>::from_elem(0u8, chunk_buf_size);
-        let res = init_impl::<_, _, H>(outboard.tree, reader, outboard, &mut buffer, progress).await?;
+        let res =
+            init_impl::<_, _, H>(outboard.tree, reader, outboard, &mut buffer, progress).await?;
         Ok(res)
     }
 
@@ -302,7 +303,7 @@ pub(crate) mod outboard_with_progress {
         use bao_tree::{
             blake3,
             io::{outboard::PreOrderOutboard, sync::CreateOutboard},
-            BaoTree,
+            BaoTree, Blake3Hasher,
         };
         use testresult::TestResult;
 
@@ -320,9 +321,10 @@ pub(crate) mod outboard_with_progress {
                     ..Default::default()
                 };
                 let mut o2 = o1.clone();
-                o1.init_from(data.as_ref())?;
-                init_outboard(data.as_ref(), &mut o2, &mut Drain).await??;
-                assert_eq!(o1.root, blake3::hash(&data));
+                o1.init_from::<Blake3Hasher>(data.as_ref())?;
+                init_outboard::<_, _, _, Blake3Hasher>(data.as_ref(), &mut o2, &mut Drain)
+                    .await??;
+                assert_eq!(o1.root, (*blake3::hash(&data).as_bytes()).into());
                 assert_eq!(o1.root, o2.root);
                 assert_eq!(o1.data, o2.data);
             }

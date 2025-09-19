@@ -12,6 +12,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use bao_tree::Blake3Hasher;
 use chrono::Utc;
 use futures_lite::StreamExt;
 use iroh_blobs::{
@@ -149,8 +150,11 @@ async fn main() -> anyhow::Result<()> {
         inline: InlineOptions::default(),
         batch: BatchOptions::default(),
     };
-    let store =
-        iroh_blobs::store::fs::FsStore::load_with_opts(path.join("blobs.db"), options).await?;
+    let store = iroh_blobs::store::fs::FsStore::load_with_opts::<Blake3Hasher>(
+        path.join("blobs.db"),
+        options,
+    )
+    .await?;
 
     // setup: add some data and tag it
     {

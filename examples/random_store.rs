@@ -1,6 +1,7 @@
 use std::{env, path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result};
+use bao_tree::{Blake3Hasher, Hasher};
 use clap::{Parser, Subcommand};
 use iroh::{SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
@@ -184,12 +185,12 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
     match args.command {
-        Commands::Provide(args) => provide(args).await,
-        Commands::Request(args) => request(args).await,
+        Commands::Provide(args) => provide::<Blake3Hasher>(args).await,
+        Commands::Request(args) => request::<Blake3Hasher>(args).await,
     }
 }
 
-async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
+async fn provide<H: Hasher + 'static>(args: ProvideArgs) -> anyhow::Result<()> {
     println!("{args:?}");
     let tempdir = if args.common.path.is_none() {
         Some(tempfile::tempdir_in(".").context("Failed to create temporary directory")?)
@@ -200,7 +201,7 @@ async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
         .common
         .path
         .unwrap_or_else(|| tempdir.as_ref().unwrap().path().to_path_buf());
-    let store = FsStore::load(&path).await?;
+    let store = FsStore::load::<H>(&path).await?;
     println!("Using store at: {}", path.display());
     let mut rng = match args.common.seed {
         Some(seed) => StdRng::seed_from_u64(seed),
@@ -238,7 +239,8 @@ async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
         .bind()
         .await?;
     let (dump_task, events_tx) = dump_provider_events(args.allow_push);
-    let blobs = iroh_blobs::BlobsProtocol::new(&store, endpoint.clone(), Some(events_tx));
+    let blobs =
+        iroh_blobs::BlobsProtocol::<Blake3Hasher>::new(&store, endpoint.clone(), Some(events_tx));
     let router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, blobs)
         .spawn();
@@ -252,7 +254,7 @@ async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn request(args: RequestArgs) -> anyhow::Result<()> {
+async fn request<H: Hasher + 'static>(args: RequestArgs) -> anyhow::Result<()> {
     println!("{args:?}");
     let tempdir = if args.common.path.is_none() {
         Some(tempfile::tempdir_in(".").context("Failed to create temporary directory")?)
@@ -263,10 +265,10 @@ async fn request(args: RequestArgs) -> anyhow::Result<()> {
         .common
         .path
         .unwrap_or_else(|| tempdir.as_ref().unwrap().path().to_path_buf());
-    let store = FsStore::load(&path).await?;
+    let store = FsStore::load::<H>(&path).await?;
     println!("Using store at: {}", path.display());
     let endpoint = iroh::Endpoint::builder().bind().await?;
-    let downloader = store.downloader(&endpoint);
+    let downloader = store.downloader::<H>(&endpoint);
     for ticket in &args.nodes {
         endpoint.add_node_addr(ticket.node_addr().clone())?;
     }

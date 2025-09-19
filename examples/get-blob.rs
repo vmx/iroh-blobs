@@ -1,6 +1,6 @@
 /// Example how to request a blob from a remote node without using a store.
 mod common;
-use bao_tree::io::BaoContentItem;
+use bao_tree::{io::BaoContentItem, Blake3Hasher};
 use clap::Parser;
 use common::setup_logging;
 use iroh::discovery::pkarr::PkarrResolver;
@@ -40,7 +40,8 @@ async fn main() -> anyhow::Result<()> {
     let connection = endpoint
         .connect(ticket.node_addr().node_id, iroh_blobs::ALPN)
         .await?;
-    let mut progress = iroh_blobs::get::request::get_blob(connection, ticket.hash());
+    let mut progress =
+        iroh_blobs::get::request::get_blob::<Blake3Hasher>(connection, ticket.hash());
     let stats = if cli.progress {
         loop {
             match progress.next().await {

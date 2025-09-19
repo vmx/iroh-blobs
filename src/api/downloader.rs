@@ -144,7 +144,8 @@ async fn handle_download_split_impl<H: Hasher>(
                 let (tx, rx) = tokio::sync::mpsc::channel::<(usize, DownloadProgessItem)>(16);
                 progress_tx.send(rx).await.ok();
                 let sink = TokioMpscSenderSink(tx).with_map(move |x| (id, x));
-                let res = execute_get::<H>(&pool, Arc::new(request), &providers, &store, sink).await;
+                let res =
+                    execute_get::<H>(&pool, Arc::new(request), &providers, &store, sink).await;
                 (hash, res)
             }
         })
@@ -526,7 +527,7 @@ impl ContentDiscovery for Shuffled {
 mod tests {
     use std::ops::Deref;
 
-    use bao_tree::ChunkRanges;
+    use bao_tree::{Blake3Hasher, ChunkRanges};
     use iroh::Watcher;
     use n0_future::StreamExt;
     use testresult::TestResult;
@@ -545,16 +546,16 @@ mod tests {
     #[ignore = "todo"]
     async fn downloader_get_many_smoke() -> TestResult<()> {
         let testdir = tempfile::tempdir()?;
-        let (r1, store1, _) = node_test_setup_fs(testdir.path().join("a")).await?;
-        let (r2, store2, _) = node_test_setup_fs(testdir.path().join("b")).await?;
-        let (r3, store3, _) = node_test_setup_fs(testdir.path().join("c")).await?;
+        let (r1, store1, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("a")).await?;
+        let (r2, store2, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("b")).await?;
+        let (r3, store3, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("c")).await?;
         let tt1 = store1.add_slice("hello world").await?;
         let tt2 = store2.add_slice("hello world 2").await?;
         let node1_addr = r1.endpoint().node_addr().initialized().await;
         let node1_id = node1_addr.node_id;
         let node2_addr = r2.endpoint().node_addr().initialized().await;
         let node2_id = node2_addr.node_id;
-        let swarm = Downloader::new(&store3, r3.endpoint());
+        let swarm = Downloader::new::<Blake3Hasher>(&store3, r3.endpoint());
         r3.endpoint().add_node_addr(node1_addr.clone())?;
         r3.endpoint().add_node_addr(node2_addr.clone())?;
         let request = GetManyRequest::builder()
@@ -577,9 +578,9 @@ mod tests {
     async fn downloader_get_smoke() -> TestResult<()> {
         // tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
-        let (r1, store1, _) = node_test_setup_fs(testdir.path().join("a")).await?;
-        let (r2, store2, _) = node_test_setup_fs(testdir.path().join("b")).await?;
-        let (r3, store3, _) = node_test_setup_fs(testdir.path().join("c")).await?;
+        let (r1, store1, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("a")).await?;
+        let (r2, store2, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("b")).await?;
+        let (r3, store3, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("c")).await?;
         let tt1 = store1.add_slice(vec![1; 10000000]).await?;
         let tt2 = store2.add_slice(vec![2; 10000000]).await?;
         let hs = [tt1.hash, tt2.hash].into_iter().collect::<HashSeq>();
@@ -593,7 +594,7 @@ mod tests {
         let node1_id = node1_addr.node_id;
         let node2_addr = r2.endpoint().node_addr().initialized().await;
         let node2_id = node2_addr.node_id;
-        let swarm = Downloader::new(&store3, r3.endpoint());
+        let swarm = Downloader::new::<Blake3Hasher>(&store3, r3.endpoint());
         r3.endpoint().add_node_addr(node1_addr.clone())?;
         r3.endpoint().add_node_addr(node2_addr.clone())?;
         let request = GetRequest::builder()
@@ -618,20 +619,20 @@ mod tests {
             let conn = r3.endpoint().connect(node1_addr, crate::ALPN).await?;
             let remote = store3.remote();
             let _rh = remote
-                .execute_get(
+                .execute_get::<Blake3Hasher>(
                     conn.clone(),
                     GetRequest::builder()
                         .root(ChunkRanges::all())
                         .build(root.hash),
                 )
                 .await?;
-            let h1 = remote.execute_get(
+            let h1 = remote.execute_get::<Blake3Hasher>(
                 conn.clone(),
                 GetRequest::builder()
                     .child(0, ChunkRanges::all())
                     .build(root.hash),
             );
-            let h2 = remote.execute_get(
+            let h2 = remote.execute_get::<Blake3Hasher>(
                 conn.clone(),
                 GetRequest::builder()
                     .child(1, ChunkRanges::all())
@@ -646,9 +647,9 @@ mod tests {
     #[tokio::test]
     async fn downloader_get_all() -> TestResult<()> {
         let testdir = tempfile::tempdir()?;
-        let (r1, store1, _) = node_test_setup_fs(testdir.path().join("a")).await?;
-        let (r2, store2, _) = node_test_setup_fs(testdir.path().join("b")).await?;
-        let (r3, store3, _) = node_test_setup_fs(testdir.path().join("c")).await?;
+        let (r1, store1, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("a")).await?;
+        let (r2, store2, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("b")).await?;
+        let (r3, store3, _) = node_test_setup_fs::<Blake3Hasher>(testdir.path().join("c")).await?;
         let tt1 = store1.add_slice(vec![1; 10000000]).await?;
         let tt2 = store2.add_slice(vec![2; 10000000]).await?;
         let hs = [tt1.hash, tt2.hash].into_iter().collect::<HashSeq>();
@@ -662,7 +663,7 @@ mod tests {
         let node1_id = node1_addr.node_id;
         let node2_addr = r2.endpoint().node_addr().initialized().await;
         let node2_id = node2_addr.node_id;
-        let swarm = Downloader::new(&store3, r3.endpoint());
+        let swarm = Downloader::new::<Blake3Hasher>(&store3, r3.endpoint());
         r3.endpoint().add_node_addr(node1_addr.clone())?;
         r3.endpoint().add_node_addr(node2_addr.clone())?;
         let request = GetRequest::all(root.hash);

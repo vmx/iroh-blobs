@@ -6,11 +6,12 @@
 //!
 //! ```rust
 //! # async fn example() -> anyhow::Result<()> {
+//! use bao_tree::Blake3Hasher;
 //! use iroh::{protocol::Router, Endpoint};
 //! use iroh_blobs::{store, BlobsProtocol};
 //!
 //! // create a store
-//! let store = store::fs::FsStore::load("blobs").await?;
+//! let store = store::fs::FsStore::load::<Blake3Hasher>("blobs").await?;
 //!
 //! // add some data
 //! let t = store.add_slice(b"hello world").await?;
@@ -19,7 +20,7 @@
 //! let endpoint = Endpoint::builder().discovery_n0().bind().await?;
 //!
 //! // create a blobs protocol handler
-//! let blobs = BlobsProtocol::new(&store, endpoint.clone(), None);
+//! let blobs = BlobsProtocol::<Blake3Hasher>::new(&store, endpoint.clone(), None);
 //!
 //! // create a router and add the blobs protocol handler
 //! let router = Router::builder(endpoint)
@@ -59,7 +60,7 @@ pub(crate) struct BlobsInner {
 #[derive(Debug, Clone)]
 pub struct BlobsProtocol<H> {
     pub(crate) inner: Arc<BlobsInner>,
-    _hasher: PhantomData::<H>,
+    _hasher: PhantomData<H>,
 }
 
 impl<H> Deref for BlobsProtocol<H> {

@@ -589,7 +589,9 @@ impl Actor {
                             format: cmd.format,
                         },
                     );
-                    (tt, cmd).spawn::<H>(&mut self.handles, &mut self.tasks).await;
+                    (tt, cmd)
+                        .spawn::<H>(&mut self.handles, &mut self.tasks)
+                        .await;
                 }
             }
         }
@@ -676,7 +678,10 @@ impl Actor {
 
 trait HashSpecificCommand: HashSpecific + Send + 'static {
     /// Handle the command on success by spawning a task into the per-hash context.
-    fn handle<H: Hasher + 'static>(self, ctx: HashContext) -> impl Future<Output = ()> + Send + 'static;
+    fn handle<H: Hasher + 'static>(
+        self,
+        ctx: HashContext,
+    ) -> impl Future<Output = ()> + Send + 'static;
 
     /// Opportunity to send an error if spawning fails due to the task being busy (inbox full)
     /// or dead (e.g. panic in one of the running tasks).
@@ -737,7 +742,7 @@ impl HashSpecificCommand for ExportPathMsg {
     }
 }
 impl HashSpecificCommand for ExportBaoMsg {
-    async fn handle<H: Hasher+ 'static>(self, ctx: HashContext) {
+    async fn handle<H: Hasher + 'static>(self, ctx: HashContext) {
         ctx.export_bao::<H>(self).await
     }
     async fn on_error(self, arg: SpawnArg<EmParams>) {
@@ -1001,7 +1006,10 @@ impl EntityApi for HashContext {
     }
 }
 
-async fn finish_import_impl<H: Hasher>(ctx: &HashContext, import_data: ImportEntry) -> io::Result<()> {
+async fn finish_import_impl<H: Hasher>(
+    ctx: &HashContext,
+    import_data: ImportEntry,
+) -> io::Result<()> {
     if ctx.id == Hash::EMPTY {
         return Ok(()); // nothing to do for the empty hash
     }
@@ -1371,7 +1379,10 @@ impl FsStore {
     }
 
     /// Load or create a new store with custom options, returning an additional sender for file store specific commands.
-    pub async fn load_with_opts<H: Hasher + 'static>(db_path: PathBuf, options: Options) -> anyhow::Result<FsStore> {
+    pub async fn load_with_opts<H: Hasher + 'static>(
+        db_path: PathBuf,
+        options: Options,
+    ) -> anyhow::Result<FsStore> {
         static THREAD_NR: AtomicU64 = AtomicU64::new(0);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .thread_name_fn(|| {
@@ -1468,7 +1479,7 @@ pub mod tests {
 
     use bao_tree::{
         io::{outboard::PreOrderMemOutboard, round_up_to_chunks_groups},
-        ChunkRanges,
+        Blake3Hasher, ChunkRanges, Hasher,
     };
     use n0_future::{stream, Stream, StreamExt};
     use testresult::TestResult;
@@ -1497,12 +1508,20 @@ pub mod tests {
 
     /// Create n0 flavoured bao. Note that this can be used to request ranges below a chunk group size,
     /// which can not be exported via bao because we don't store hashes below the chunk group level.
-    pub fn create_n0_bao(data: &[u8], ranges: &ChunkRanges) -> anyhow::Result<(Hash, Vec<u8>)> {
-        let outboard = PreOrderMemOutboard::create(data, IROH_BLOCK_SIZE);
+    pub fn create_n0_bao<H: Hasher>(
+        data: &[u8],
+        ranges: &ChunkRanges,
+    ) -> anyhow::Result<(Hash, Vec<u8>)> {
+        let outboard = PreOrderMemOutboard::create::<H>(data, IROH_BLOCK_SIZE);
         let mut encoded = Vec::new();
         let size = data.len() as u64;
         encoded.extend_from_slice(&size.to_le_bytes());
-        bao_tree::io::sync::encode_ranges_validated(data, &outboard, ranges, &mut encoded)?;
+        bao_tree::io::sync::encode_ranges_validated::<_, _, _, H>(
+            data,
+            &outboard,
+            ranges,
+            &mut encoded,
+        )?;
         Ok((outboard.root.into(), encoded))
     }
 
@@ -1521,12 +1540,12 @@ pub mod tests {
         round_up_to_chunks_groups(ranges, IROH_BLOCK_SIZE)
     }
 
-    fn create_n0_bao_full(
+    fn create_n0_bao_full<H: Hasher>(
         data: &[u8],
         ranges: &ChunkRanges,
     ) -> anyhow::Result<(Hash, ChunkRanges, Vec<u8>)> {
         let ranges = round_up_request(data.len() as u64, ranges);
-        let (hash, encoded) = create_n0_bao(data, &ranges)?;
+        let (hash, encoded) = create_n0_bao::<H>(data, &ranges)?;
         Ok((hash, ranges, encoded))
     }
 
@@ -1537,18 +1556,21 @@ pub mod tests {
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
         let options = Options::new(&db_dir);
-        let store = FsStore::load_with_opts(db_dir.join("blobs.db"), options).await?;
+        let store =
+            FsStore::load_with_opts::<Blake3Hasher>(db_dir.join("blobs.db"), options).await?;
         let sizes = INTERESTING_SIZES;
         for size in sizes {
             let data = test_data(size);
             let ranges = ChunkRanges::all();
-            let (hash, bao) = create_n0_bao(&data, &ranges)?;
+            let (hash, bao) = create_n0_bao::<Blake3Hasher>(&data, &ranges)?;
             let obs = store.observe(hash);
             let task = tokio::spawn(async move {
                 obs.await_completion().await?;
                 api::Result::Ok(())
             });
-            store.import_bao_bytes(hash, ranges, bao).await?;
+            store
+                .import_bao_bytes::<Blake3Hasher>(hash, ranges, bao)
+                .await?;
             task.await??;
         }
         Ok(())
@@ -1578,10 +1600,10 @@ pub mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
-        let store = FsStore::load(db_dir).await?;
+        let store = FsStore::load::<Blake3Hasher>(db_dir).await?;
         for size in INTERESTING_SIZES {
             let expected = test_data(size);
-            let expected_hash = Hash::new(&expected);
+            let expected_hash = Hash::new::<Blake3Hasher>(&expected);
             let stream = bytes_to_stream(expected.clone(), 1023);
             let obs = store.observe(expected_hash);
             let tt = store.add_stream(stream).await.temp_tag().await?;
@@ -1601,12 +1623,12 @@ pub mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
-        let store = FsStore::load(&db_dir).await?;
+        let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
         let sizes = INTERESTING_SIZES;
         trace!("{}", Options::new(&db_dir).is_inlined_data(16385));
         for size in sizes {
             let expected = test_data(size);
-            let expected_hash = Hash::new(&expected);
+            let expected_hash = Hash::new::<Blake3Hasher>(&expected);
             let obs = store.observe(expected_hash);
             let tt = store.add_bytes(expected.clone()).await?;
             assert_eq!(expected_hash, tt.hash);
@@ -1628,13 +1650,13 @@ pub mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
-        let store = FsStore::load(db_dir).await?;
+        let store = FsStore::load::<Blake3Hasher>(db_dir).await?;
         for size in INTERESTING_SIZES
             .into_iter()
             .filter(|x| *x != 0 && *x <= IROH_BLOCK_SIZE.bytes())
         {
             let expected = test_data(size);
-            let expected_hash = Hash::new(&expected);
+            let expected_hash = Hash::new::<Blake3Hasher>(&expected);
             let obs = store.observe(expected_hash);
             let tt = store.add_bytes(expected.clone()).await?;
             assert_eq!(expected_hash, tt.hash);
@@ -1661,10 +1683,10 @@ pub mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
-        let store = FsStore::load(db_dir).await?;
+        let store = FsStore::load::<Blake3Hasher>(db_dir).await?;
         for size in INTERESTING_SIZES {
             let expected = test_data(size);
-            let expected_hash = Hash::new(&expected);
+            let expected_hash = Hash::new::<Blake3Hasher>(&expected);
             let path = testdir.path().join(format!("in-{size}"));
             fs::write(&path, &expected)?;
             let obs = store.observe(expected_hash);
@@ -1686,10 +1708,10 @@ pub mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
-        let store = FsStore::load(db_dir).await?;
+        let store = FsStore::load::<Blake3Hasher>(db_dir).await?;
         for size in INTERESTING_SIZES {
             let expected = test_data(size);
-            let expected_hash = Hash::new(&expected);
+            let expected_hash = Hash::new::<Blake3Hasher>(&expected);
             let tt = store.add_bytes(expected.clone()).await?;
             assert_eq!(expected_hash, tt.hash);
             let out_path = testdir.path().join(format!("out-{size}"));
@@ -1706,12 +1728,12 @@ pub mod tests {
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             let data = test_data(100000);
             let ranges = ChunkRanges::chunks(16..32);
-            let (hash, bao) = create_n0_bao(&data, &ranges)?;
+            let (hash, bao) = create_n0_bao::<Blake3Hasher>(&data, &ranges)?;
             store
-                .import_bao_bytes(hash, ranges.clone(), bao.clone())
+                .import_bao_bytes::<Blake3Hasher>(hash, ranges.clone(), bao.clone())
                 .await?;
             let bitfield = store.observe(hash).await?;
             assert_eq!(bitfield.ranges, ranges);
@@ -1729,13 +1751,13 @@ pub mod tests {
         let sizes = [1];
         let db_dir = testdir.path().join("db");
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let data = vec![0u8; size];
-                let (hash, encoded) = create_n0_bao(&data, &ChunkRanges::all())?;
+                let (hash, encoded) = create_n0_bao::<Blake3Hasher>(&data, &ChunkRanges::all())?;
                 let data = Bytes::from(encoded);
                 store
-                    .import_bao_bytes(hash, ChunkRanges::all(), data)
+                    .import_bao_bytes::<Blake3Hasher>(hash, ChunkRanges::all(), data)
                     .await?;
             }
             store.shutdown().await?;
@@ -1750,14 +1772,14 @@ pub mod tests {
         let sizes = [1048576];
         let db_dir = testdir.path().join("db");
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let data = vec![0u8; size];
-                let (hash, encoded) = create_n0_bao(&data, &ChunkRanges::all())?;
+                let (hash, encoded) = create_n0_bao::<Blake3Hasher>(&data, &ChunkRanges::all())?;
                 let data = Bytes::from(encoded);
                 trace!("importing size={}", size);
                 store
-                    .import_bao_bytes(hash, ChunkRanges::all(), data)
+                    .import_bao_bytes::<Blake3Hasher>(hash, ChunkRanges::all(), data)
                     .await?;
             }
             store.shutdown().await?;
@@ -1772,22 +1794,22 @@ pub mod tests {
         let sizes = INTERESTING_SIZES;
         let db_dir = testdir.path().join("db");
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let data = vec![0u8; size];
-                let (hash, encoded) = create_n0_bao(&data, &ChunkRanges::all())?;
+                let (hash, encoded) = create_n0_bao::<Blake3Hasher>(&data, &ChunkRanges::all())?;
                 let data = Bytes::from(encoded);
                 store
-                    .import_bao_bytes(hash, ChunkRanges::all(), data)
+                    .import_bao_bytes::<Blake3Hasher>(hash, ChunkRanges::all(), data)
                     .await?;
             }
             store.shutdown().await?;
         }
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let expected = vec![0u8; size];
-                let hash = Hash::new(&expected);
+                let hash = Hash::new::<Blake3Hasher>(&expected);
                 let actual = store
                     .export_bao(hash, ChunkRanges::all())
                     .data_to_vec()
@@ -1807,12 +1829,16 @@ pub mod tests {
         let db_dir = testdir.path().join("db");
         let just_size = ChunkRanges::last_chunk();
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let data = test_data(size);
-                let (hash, ranges, encoded) = create_n0_bao_full(&data, &just_size)?;
+                let (hash, ranges, encoded) =
+                    create_n0_bao_full::<Blake3Hasher>(&data, &just_size)?;
                 let data = Bytes::from(encoded);
-                if let Err(cause) = store.import_bao_bytes(hash, ranges, data).await {
+                if let Err(cause) = store
+                    .import_bao_bytes::<Blake3Hasher>(hash, ranges, data)
+                    .await
+                {
                     panic!("failed to import size={size}: {cause}");
                 }
             }
@@ -1820,11 +1846,12 @@ pub mod tests {
             store.shutdown().await?;
         }
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             store.dump().await?;
             for size in sizes {
                 let data = test_data(size);
-                let (hash, ranges, expected) = create_n0_bao_full(&data, &just_size)?;
+                let (hash, ranges, expected) =
+                    create_n0_bao_full::<Blake3Hasher>(&data, &just_size)?;
                 let actual = match store.export_bao(hash, ranges).bao_to_vec().await {
                     Ok(actual) => actual,
                     Err(cause) => panic!("failed to export size={size}: {cause}"),
@@ -1846,12 +1873,16 @@ pub mod tests {
         let just_size = ChunkRanges::last_chunk();
         // stage 1, import just the last full chunk group to get a validated size
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let data = test_data(size);
-                let (hash, ranges, encoded) = create_n0_bao_full(&data, &just_size)?;
+                let (hash, ranges, encoded) =
+                    create_n0_bao_full::<Blake3Hasher>(&data, &just_size)?;
                 let data = Bytes::from(encoded);
-                if let Err(cause) = store.import_bao_bytes(hash, ranges, data).await {
+                if let Err(cause) = store
+                    .import_bao_bytes::<Blake3Hasher>(hash, ranges, data)
+                    .await
+                {
                     panic!("failed to import size={size}: {cause}");
                 }
             }
@@ -1861,16 +1892,20 @@ pub mod tests {
         dump_dir_full(testdir.path())?;
         // stage 2, import the rest
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let remaining = ChunkRanges::all() - round_up_request(size as u64, &just_size);
                 if remaining.is_empty() {
                     continue;
                 }
                 let data = test_data(size);
-                let (hash, ranges, encoded) = create_n0_bao_full(&data, &remaining)?;
+                let (hash, ranges, encoded) =
+                    create_n0_bao_full::<Blake3Hasher>(&data, &remaining)?;
                 let data = Bytes::from(encoded);
-                if let Err(cause) = store.import_bao_bytes(hash, ranges, data).await {
+                if let Err(cause) = store
+                    .import_bao_bytes::<Blake3Hasher>(hash, ranges, data)
+                    .await
+                {
                     panic!("failed to import size={size}: {cause}");
                 }
             }
@@ -1879,11 +1914,12 @@ pub mod tests {
         }
         // check if the data is complete
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             store.dump().await?;
             for size in sizes {
                 let data = test_data(size);
-                let (hash, ranges, expected) = create_n0_bao_full(&data, &ChunkRanges::all())?;
+                let (hash, ranges, expected) =
+                    create_n0_bao_full::<Blake3Hasher>(&data, &ChunkRanges::all())?;
                 let actual = match store.export_bao(hash, ranges).bao_to_vec().await {
                     Ok(actual) => actual,
                     Err(cause) => panic!("failed to export size={size}: {cause}"),
@@ -1910,12 +1946,16 @@ pub mod tests {
         let just_size = just_size();
         // stage 1, import just the last full chunk group to get a validated size
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let data = test_data(size);
-                let (hash, ranges, encoded) = create_n0_bao_full(&data, &just_size)?;
+                let (hash, ranges, encoded) =
+                    create_n0_bao_full::<Blake3Hasher>(&data, &just_size)?;
                 let data = Bytes::from(encoded);
-                if let Err(cause) = store.import_bao_bytes(hash, ranges, data).await {
+                if let Err(cause) = store
+                    .import_bao_bytes::<Blake3Hasher>(hash, ranges, data)
+                    .await
+                {
                     panic!("failed to import size={size}: {cause}");
                 }
             }
@@ -1925,11 +1965,11 @@ pub mod tests {
         dump_dir_full(testdir.path())?;
         // stage 2, import the rest
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             for size in sizes {
                 let expected_ranges = round_up_request(size as u64, &just_size);
                 let data = test_data(size);
-                let hash = Hash::new(&data);
+                let hash = Hash::new::<Blake3Hasher>(&data);
                 let bitfield = store.observe(hash).await?;
                 assert_eq!(bitfield.ranges, expected_ranges);
             }
@@ -1949,12 +1989,18 @@ pub mod tests {
         let just_size = just_size();
         // stage 1, import just the last full chunk group to get a validated size
         {
-            let store = FsStore::load_with_opts(db_dir.join("blobs.db"), options.clone()).await?;
+            let store =
+                FsStore::load_with_opts::<Blake3Hasher>(db_dir.join("blobs.db"), options.clone())
+                    .await?;
             for size in sizes {
                 let data = test_data(size);
-                let (hash, ranges, encoded) = create_n0_bao_full(&data, &just_size)?;
+                let (hash, ranges, encoded) =
+                    create_n0_bao_full::<Blake3Hasher>(&data, &just_size)?;
                 let data = Bytes::from(encoded);
-                if let Err(cause) = store.import_bao_bytes(hash, ranges, data).await {
+                if let Err(cause) = store
+                    .import_bao_bytes::<Blake3Hasher>(hash, ranges, data)
+                    .await
+                {
                     panic!("failed to import size={size}: {cause}");
                 }
             }
@@ -1965,11 +2011,13 @@ pub mod tests {
         dump_dir_full(testdir.path())?;
         // stage 2, import the rest
         {
-            let store = FsStore::load_with_opts(db_dir.join("blobs.db"), options.clone()).await?;
+            let store =
+                FsStore::load_with_opts::<Blake3Hasher>(db_dir.join("blobs.db"), options.clone())
+                    .await?;
             for size in sizes {
                 let expected_ranges = round_up_request(size as u64, &just_size);
                 let data = test_data(size);
-                let hash = Hash::new(&data);
+                let hash = Hash::new::<Blake3Hasher>(&data);
                 let bitfield = store.observe(hash).await?;
                 assert_eq!(bitfield.ranges, expected_ranges, "size={size}");
             }
@@ -1986,7 +2034,7 @@ pub mod tests {
         let sizes = INTERESTING_SIZES;
         let db_dir = testdir.path().join("db");
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             let mut tts = Vec::new();
             for size in sizes {
                 let data = test_data(size);
@@ -1997,11 +2045,11 @@ pub mod tests {
             store.shutdown().await?;
         }
         {
-            let store = FsStore::load(&db_dir).await?;
+            let store = FsStore::load::<Blake3Hasher>(&db_dir).await?;
             store.dump().await?;
             for size in sizes {
                 let expected = test_data(size);
-                let hash = Hash::new(&expected);
+                let hash = Hash::new::<Blake3Hasher>(&expected);
                 let Ok(actual) = store
                     .export_bao(hash, ChunkRanges::all())
                     .data_to_vec()
@@ -2016,9 +2064,9 @@ pub mod tests {
         Ok(())
     }
 
-    async fn test_batch(store: &Store) -> TestResult<()> {
+    async fn test_batch<H: Hasher>(store: &Store) -> TestResult<()> {
         let batch = store.blobs().batch().await?;
-        let tt1 = batch.temp_tag(Hash::new("foo")).await?;
+        let tt1 = batch.temp_tag(Hash::new::<H>("foo")).await?;
         let tt2 = batch.add_slice("boo").await?;
         let tts = store
             .tags()
@@ -2050,8 +2098,8 @@ pub mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
-        let store = FsStore::load(db_dir).await?;
-        test_batch(&store).await
+        let store = FsStore::load::<Blake3Hasher>(db_dir).await?;
+        test_batch::<Blake3Hasher>(&store).await
     }
 
     #[tokio::test]
@@ -2059,7 +2107,7 @@ pub mod tests {
         tracing_subscriber::fmt::try_init().ok();
         let testdir = tempfile::tempdir()?;
         let db_dir = testdir.path().join("db");
-        let store = FsStore::load(db_dir).await?;
+        let store = FsStore::load::<Blake3Hasher>(db_dir).await?;
         let haf = HashAndFormat::raw(Hash::from([0u8; 32]));
         store.tags().set(Tag::from("test"), haf).await?;
         store.tags().set(Tag::from("boo"), haf).await?;
@@ -2101,8 +2149,10 @@ pub mod tests {
         for size in sizes {
             let data = test_data(size);
             let ranges = ChunkRanges::all();
-            let (hash, bao) = create_n0_bao(&data, &ranges)?;
-            store.import_bao_bytes(hash, ranges, bao).await?;
+            let (hash, bao) = create_n0_bao::<Blake3Hasher>(&data, &ranges)?;
+            store
+                .import_bao_bytes::<Blake3Hasher>(hash, ranges, bao)
+                .await?;
         }
 
         for (_hash, _bao_tree) in bao_by_hash {
