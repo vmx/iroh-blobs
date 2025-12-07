@@ -18,7 +18,7 @@
 //! [iroh]: https://docs.rs/iroh
 use std::fmt::{self, Debug};
 
-use bao_tree::{io::fsm::BaoContentItem, ChunkNum};
+use bao_tree::{io::fsm::BaoContentItem, ChunkNum, Hasher};
 use fsm::RequestCounters;
 use n0_error::Result;
 use n0_future::time::{Duration, Instant};
@@ -546,29 +546,29 @@ pub mod fsm {
         }
 
         /// Drain the response and throw away the result
-        pub async fn drain(self) -> result::Result<AtEndBlob<R>, DecodeError> {
+        pub async fn drain<H: Hasher>(self) -> result::Result<AtEndBlob<R>, DecodeError> {
             let (content, _size) = self.next().await?;
-            content.drain().await
+            content.drain::<H>().await
         }
 
         /// Concatenate the entire response into a vec
         ///
         /// For a request that does not request the complete blob, this will just
         /// concatenate the ranges that were requested.
-        pub async fn concatenate_into_vec(
+        pub async fn concatenate_into_vec<H: Hasher>(
             self,
         ) -> result::Result<(AtEndBlob<R>, Vec<u8>), DecodeError> {
             let (content, _size) = self.next().await?;
-            content.concatenate_into_vec().await
+            content.concatenate_into_vec::<H>().await
         }
 
         /// Write the entire blob to a slice writer.
-        pub async fn write_all<D: AsyncSliceWriter>(
+        pub async fn write_all<D: AsyncSliceWriter, H: Hasher>(
             self,
             data: D,
         ) -> result::Result<AtEndBlob<R>, DecodeError> {
             let (content, _size) = self.next().await?;
-            let res = content.write_all(data).await?;
+            let res = content.write_all::<_, H>(data).await?;
             Ok(res)
         }
 
@@ -576,7 +576,7 @@ pub mod fsm {
         ///
         /// The outboard is only written to if the blob is larger than a single
         /// chunk group.
-        pub async fn write_all_with_outboard<D, O>(
+        pub async fn write_all_with_outboard<D, O, H>(
             self,
             outboard: Option<O>,
             data: D,
@@ -584,9 +584,10 @@ pub mod fsm {
         where
             D: AsyncSliceWriter,
             O: OutboardMut,
+            H: Hasher,
         {
             let (content, _size) = self.next().await?;
-            let res = content.write_all_with_outboard(outboard, data).await?;
+            let res = content.write_all_with_outboard::<_, _, H>(outboard, data).await?;
             Ok(res)
         }
 
@@ -729,8 +730,8 @@ pub mod fsm {
 
     impl<R: RecvStream> AtBlobContent<R> {
         /// Read the next item, either content, an error, or the end of the blob
-        pub async fn next(self) -> BlobContentNext<R> {
-            match self.stream.next().await {
+        pub async fn next<H: Hasher>(self) -> BlobContentNext<R> {
+            match self.stream.next::<H>().await {
                 ResponseDecoderNext::More((stream, res)) => {
                     let mut next = Self { stream, ..self };
                     let res = res.map_err(DecodeError::from);
@@ -776,10 +777,10 @@ pub mod fsm {
         }
 
         /// Drain the response and throw away the result
-        pub async fn drain(self) -> result::Result<AtEndBlob<R>, DecodeError> {
+        pub async fn drain<H: Hasher>(self) -> result::Result<AtEndBlob<R>, DecodeError> {
             let mut content = self;
             loop {
-                match content.next().await {
+                match content.next::<H>().await {
                     BlobContentNext::More((content1, res)) => {
                         let _ = res?;
                         content = content1;
@@ -792,13 +793,13 @@ pub mod fsm {
         }
 
         /// Concatenate the entire response into a vec
-        pub async fn concatenate_into_vec(
+        pub async fn concatenate_into_vec<H: Hasher>(
             self,
         ) -> result::Result<(AtEndBlob<R>, Vec<u8>), DecodeError> {
             let mut res = Vec::with_capacity(1024);
             let mut curr = self;
             let done = loop {
-                match curr.next().await {
+                match curr.next::<H>().await {
                     BlobContentNext::More((next, data)) => {
                         if let BaoContentItem::Leaf(leaf) = data? {
                             res.extend_from_slice(&leaf.data);
@@ -818,7 +819,7 @@ pub mod fsm {
         ///
         /// The outboard is only written to if the blob is larger than a single
         /// chunk group.
-        pub async fn write_all_with_outboard<D, O>(
+        pub async fn write_all_with_outboard<D, O, H>(
             self,
             mut outboard: Option<O>,
             mut data: D,
@@ -826,10 +827,11 @@ pub mod fsm {
         where
             D: AsyncSliceWriter,
             O: OutboardMut,
+            H: Hasher,
         {
             let mut content = self;
             loop {
-                match content.next().await {
+                match content.next::<H>().await {
                     BlobContentNext::More((content1, item)) => {
                         content = content1;
                         match item? {
@@ -856,13 +858,14 @@ pub mod fsm {
         }
 
         /// Write the entire blob to a slice writer.
-        pub async fn write_all<D>(self, mut data: D) -> result::Result<AtEndBlob<R>, DecodeError>
+        pub async fn write_all<D, H>(self, mut data: D) -> result::Result<AtEndBlob<R>, DecodeError>
         where
             D: AsyncSliceWriter,
+            H: Hasher,
         {
             let mut content = self;
             loop {
-                match content.next().await {
+                match content.next::<H>().await {
                     BlobContentNext::More((content1, item)) => {
                         content = content1;
                         match item? {

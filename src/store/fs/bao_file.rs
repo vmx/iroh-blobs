@@ -7,14 +7,13 @@ use std::{
 };
 
 use bao_tree::{
-    blake3,
     io::{
         fsm::BaoContentItem,
         mixed::ReadBytesAt,
         outboard::PreOrderOutboard,
         sync::{ReadAt, WriteAt},
     },
-    BaoTree, ChunkRanges,
+    BaoTree, ChunkRanges, Hasher,
 };
 use bytes::{Bytes, BytesMut};
 use derive_more::Debug;
@@ -158,7 +157,7 @@ impl PartialFileStorage {
         Ok(())
     }
 
-    fn load(hash: &Hash, options: &PathOptions) -> io::Result<Self> {
+    fn load<H: Hasher>(hash: &Hash, options: &PathOptions) -> io::Result<Self> {
         let bitfield_path = options.bitfield_path(hash);
         let data = create_read_write(options.data_path(hash))?;
         let outboard = create_read_write(options.outboard_path(hash))?;
@@ -177,10 +176,10 @@ impl PartialFileStorage {
                 let outboard = PreOrderOutboard {
                     data: &outboard,
                     tree: BaoTree::new(size, IROH_BLOCK_SIZE),
-                    root: blake3::Hash::from(*hash),
+                    root: bao_tree::Hash::from(*hash),
                 };
                 let mut ranges = ChunkRanges::empty();
-                for range in bao_tree::io::sync::valid_ranges(outboard, &data, &ChunkRanges::all())
+                for range in bao_tree::io::sync::valid_ranges::<_, _, H>(outboard, &data, &ChunkRanges::all())
                     .into_iter()
                     .flatten()
                 {
@@ -344,7 +343,7 @@ impl fmt::Debug for BaoFileStorage {
 impl PartialMemStorage {
     /// Converts this storage into a complete storage, using the given hash for
     /// path names and the given options for decisions about inlining.
-    fn into_complete(self, ctx: &HashContext) -> io::Result<(CompleteStorage, EntryState<Bytes>)> {
+    fn into_complete<H: Hasher + 'static>(self, ctx: &HashContext<H>) -> io::Result<(CompleteStorage, EntryState<Bytes>)> {
         let options = &ctx.global.options;
         let hash = &ctx.id;
         let size = self.current_size();
@@ -412,11 +411,11 @@ impl BaoFileStorage {
         }
     }
 
-    pub(super) fn write_batch(
+    pub(super) fn write_batch<H: Hasher + 'static>(
         self,
         batch: &[BaoContentItem],
         bitfield: &Bitfield,
-        ctx: &HashContext,
+        ctx: &HashContext<H>,
     ) -> io::Result<(Self, Option<EntryState<bytes::Bytes>>)> {
         Ok(match self {
             BaoFileStorage::NonExisting => {
@@ -574,7 +573,7 @@ impl ReadAt for OutboardReader {
 }
 
 impl BaoFileStorage {
-    pub async fn open(state: Option<EntryState<Bytes>>, ctx: &HashContext) -> io::Result<Self> {
+    pub async fn open<H: Hasher + 'static>(state: Option<EntryState<Bytes>>, ctx: &HashContext<H>) -> io::Result<Self> {
         let hash = &ctx.id;
         let options = &ctx.global.options;
         Ok(match state {
@@ -608,16 +607,16 @@ impl BaoFileStorage {
                 };
                 Self::new_complete(data, outboard)
             }
-            Some(EntryState::Partial { .. }) => Self::new_partial_file(ctx).await?,
+            Some(EntryState::Partial { .. }) => Self::new_partial_file::<H>(ctx).await?,
             None => Self::NonExisting,
         })
     }
 
     /// Create a new bao file handle with a partial file.
-    pub(super) async fn new_partial_file(ctx: &HashContext) -> io::Result<Self> {
+    pub(super) async fn new_partial_file<H: Hasher + 'static>(ctx: &HashContext<H>) -> io::Result<Self> {
         let hash = &ctx.id;
         let options = ctx.global.options.clone();
-        let storage = PartialFileStorage::load(hash, &options.path)?;
+        let storage = PartialFileStorage::load::<H>(hash, &options.path)?;
         Ok(if storage.bitfield.is_complete() {
             let size = storage.bitfield.size;
             let (storage, entry_state) = storage.into_complete(size, &options)?;
@@ -665,7 +664,7 @@ impl BaoFileHandle {
 
 impl PartialMemStorage {
     /// Persist the batch to disk.
-    fn persist(self, ctx: &HashContext) -> io::Result<PartialFileStorage> {
+    fn persist<H: Hasher + 'static>(self, ctx: &HashContext<H>) -> io::Result<PartialFileStorage> {
         let options = &ctx.global.options.path;
         let hash = &ctx.id;
         ctx.global.protect.protect(

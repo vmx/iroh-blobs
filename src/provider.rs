@@ -5,7 +5,7 @@
 //! handler with an [`iroh::Endpoint`](iroh::protocol::Router).
 use std::{fmt::Debug, future::Future, io};
 
-use bao_tree::ChunkRanges;
+use bao_tree::{ChunkRanges, Hasher};
 use iroh::endpoint::{self, ConnectionError, VarInt};
 use iroh_io::{AsyncStreamReader, AsyncStreamWriter};
 use n0_error::{e, stack_error, Result};
@@ -283,7 +283,7 @@ impl<W: SendStream> ProgressWriter<W> {
 }
 
 /// Handle a single connection.
-pub async fn handle_connection(
+pub async fn handle_connection<H: Hasher + 'static>(
     connection: endpoint::Connection,
     store: Store,
     progress: EventSender,
@@ -305,7 +305,7 @@ pub async fn handle_connection(
         while let Ok(pair) = StreamPair::accept(&connection, progress.clone()).await {
             let span = debug_span!("stream", stream_id = %pair.stream_id());
             let store = store.clone();
-            n0_future::task::spawn(handle_stream(pair, store).instrument(span));
+            n0_future::task::spawn(handle_stream::<_, _, H>(pair, store).instrument(span));
         }
         progress
             .connection_closed(|| ConnectionClosed { connection_id })
@@ -369,7 +369,7 @@ async fn handle_read_result<R: RecvStream, T, E: HasErrorCode>(
     }
 }
 
-pub async fn handle_stream<R: RecvStream, W: SendStream>(
+pub async fn handle_stream<R: RecvStream, W: SendStream, H: Hasher>(
     mut pair: StreamPair<R, W>,
     store: Store,
 ) -> n0_error::Result<()> {
@@ -378,7 +378,7 @@ pub async fn handle_stream<R: RecvStream, W: SendStream>(
         Request::Get(request) => handle_get(pair, store, request).await?,
         Request::GetMany(request) => handle_get_many(pair, store, request).await?,
         Request::Observe(request) => handle_observe(pair, store, request).await?,
-        Request::Push(request) => handle_push(pair, store, request).await?,
+        Request::Push(request) => handle_push::<_, _, H>(pair, store, request).await?,
         _ => {}
     }
     Ok(())
@@ -546,7 +546,7 @@ impl HasErrorCode for HandlePushError {
 /// Handle a single push request.
 ///
 /// Requires a database, the request, and a reader.
-async fn handle_push_impl<R: RecvStream>(
+async fn handle_push_impl<R: RecvStream, H: Hasher>(
     store: Store,
     request: PushRequest,
     reader: &mut ProgressReader<R>,
@@ -558,7 +558,7 @@ async fn handle_push_impl<R: RecvStream>(
     if !root_ranges.is_empty() {
         // todo: send progress from import_bao_quinn or rename to import_bao_quinn_with_progress
         store
-            .import_bao_reader(hash, root_ranges.clone(), &mut reader.inner)
+            .import_bao_reader::<_, H>(hash, root_ranges.clone(), &mut reader.inner)
             .await?;
     }
     if request.ranges.is_blob() {
@@ -573,13 +573,13 @@ async fn handle_push_impl<R: RecvStream>(
             continue;
         }
         store
-            .import_bao_reader(child_hash, child_ranges.clone(), &mut reader.inner)
+            .import_bao_reader::<_, H>(child_hash, child_ranges.clone(), &mut reader.inner)
             .await?;
     }
     Ok(())
 }
 
-pub async fn handle_push<R: RecvStream, W: SendStream>(
+pub async fn handle_push<R: RecvStream, W: SendStream, H: Hasher>(
     mut pair: StreamPair<R, W>,
     store: Store,
     request: PushRequest,
@@ -587,7 +587,7 @@ pub async fn handle_push<R: RecvStream, W: SendStream>(
     let res = pair.push_request(|| request.clone()).await;
     let tracker = handle_read_request_result(&mut pair, res).await?;
     let mut reader = pair.into_reader(tracker).await?;
-    let res = handle_push_impl(store, request, &mut reader).await;
+    let res = handle_push_impl::<_, H>(store, request, &mut reader).await;
     handle_read_result(&mut reader, res).await?;
     Ok(())
 }

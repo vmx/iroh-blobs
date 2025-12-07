@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, future::Future};
 
 // n0_error::Context is no longer exported; use explicit mapping instead.
-use bao_tree::blake3;
+use bao_tree::{blake3, Hasher};
 use bytes::Bytes;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,8 @@ impl Collection {
             names: self.names(),
         };
         let meta_bytes = postcard::to_stdvec(&meta).unwrap();
-        let meta_bytes_hash = blake3::hash(&meta_bytes).into();
+        // TODO vmx 2025-09-14: think about using the generic hasher.
+        let meta_bytes_hash = blake3::hash(&meta_bytes).as_bytes().into();
         let links = std::iter::once(meta_bytes_hash)
             .chain(self.links())
             .collect::<HashSeq>();
@@ -114,12 +115,12 @@ impl Collection {
     ///
     /// Returns the fsm at the start of the first child blob (if any),
     /// the links array, and the collection.
-    pub async fn read_fsm(
+    pub async fn read_fsm<H: Hasher>(
         fsm_at_start_root: fsm::AtStartRoot,
     ) -> Result<(fsm::EndBlobNext, HashSeq, Collection)> {
         let (next, links) = {
             let curr = fsm_at_start_root.next();
-            let (curr, data) = curr.concatenate_into_vec().await?;
+            let (curr, data) = curr.concatenate_into_vec::<H>().await?;
             let links = HashSeq::new(data.into())
                 .ok_or_else(|| n0_error::anyerr!("links could not be parsed"))?;
             (curr.next(), links)
@@ -133,7 +134,7 @@ impl Collection {
                 .pop_front()
                 .ok_or_else(|| n0_error::anyerr!("meta link not found"))?;
             let curr = at_meta.next(meta_link);
-            let (curr, names) = curr.concatenate_into_vec().await?;
+            let (curr, names) = curr.concatenate_into_vec::<H>().await?;
             let names = postcard::from_bytes::<CollectionMeta>(&names).anyerr()?;
             n0_error::ensure_any!(
                 names.header == *Self::HEADER,
@@ -150,10 +151,10 @@ impl Collection {
     /// Read the collection and all it's children from a get fsm.
     ///
     /// Returns the collection, a map from blob offsets to bytes, and the stats.
-    pub async fn read_fsm_all(
+    pub async fn read_fsm_all<H: Hasher>(
         fsm_at_start_root: crate::get::fsm::AtStartRoot,
     ) -> Result<(Collection, BTreeMap<u64, Bytes>, Stats)> {
-        let (next, links, collection) = Self::read_fsm(fsm_at_start_root).await?;
+        let (next, links, collection) = Self::read_fsm::<H>(fsm_at_start_root).await?;
         let mut res = BTreeMap::new();
         let mut curr = next;
         let end = loop {
@@ -164,7 +165,7 @@ impl Collection {
                         break more.finish();
                     };
                     let header = more.next(hash);
-                    let (next, blob) = header.concatenate_into_vec().await?;
+                    let (next, blob) = header.concatenate_into_vec::<H>().await?;
                     res.insert(child_offset - 1, blob.into());
                     curr = next.next();
                 }

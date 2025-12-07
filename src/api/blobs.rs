@@ -19,7 +19,7 @@ use bao_tree::{
         fsm::{ResponseDecoder, ResponseDecoderNext},
         BaoContentItem, Leaf,
     },
-    BaoTree, ChunkNum, ChunkRanges,
+    BaoTree, ChunkNum, ChunkRanges, Hasher,
 };
 use bytes::Bytes;
 use genawaiter::sync::Gen;
@@ -430,7 +430,7 @@ impl Blobs {
     }
 
     #[cfg_attr(feature = "hide-proto-docs", doc(hidden))]
-    pub async fn import_bao_reader<R: crate::util::RecvStream>(
+    pub async fn import_bao_reader<R: crate::util::RecvStream, H: Hasher>(
         &self,
         hash: Hash,
         ranges: ChunkRanges,
@@ -460,7 +460,7 @@ impl Blobs {
         let handle = self.import_bao_with_opts(options, 32).await?;
         let driver = async move {
             let reader = loop {
-                match decoder.next().await {
+                match decoder.next::<H>().await {
                     ResponseDecoderNext::More((rest, item)) => {
                         handle.tx.send(item?).await?;
                         decoder = rest;
@@ -478,13 +478,13 @@ impl Blobs {
     }
 
     #[cfg_attr(feature = "hide-proto-docs", doc(hidden))]
-    pub async fn import_bao_bytes(
+    pub async fn import_bao_bytes<H: Hasher>(
         &self,
         hash: Hash,
         ranges: ChunkRanges,
         data: impl Into<Bytes>,
     ) -> RequestResult<()> {
-        self.import_bao_reader(hash, ranges, data.into()).await?;
+        self.import_bao_reader::<_, H>(hash, ranges, data.into()).await?;
         Ok(())
     }
 

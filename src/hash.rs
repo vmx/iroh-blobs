@@ -3,7 +3,7 @@
 use std::{borrow::Borrow, fmt, str::FromStr};
 
 use arrayvec::ArrayString;
-use bao_tree::blake3;
+use bao_tree::Hasher;
 use n0_error::{e, stack_error, StdResultExt};
 use postcard::experimental::max_size::MaxSize;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -12,7 +12,7 @@ use crate::store::util::DD;
 
 /// Hash type used throughout.
 #[derive(PartialEq, Eq, Copy, Clone, Hash)]
-pub struct Hash(blake3::Hash);
+pub struct Hash(bao_tree::Hash);
 
 impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -21,6 +21,8 @@ impl fmt::Debug for Hash {
 }
 
 impl Hash {
+    // TODO vmx 2025-07-31: think about how to implement this dependent on the hasher.
+    // The hash for the empty byte range (`b""`).
     /// The hash for the empty byte range (`b""`).
     pub const EMPTY: Hash = Hash::from_bytes([
         175, 19, 73, 185, 245, 249, 161, 166, 160, 64, 77, 234, 54, 220, 201, 73, 155, 203, 37,
@@ -28,8 +30,8 @@ impl Hash {
     ]);
 
     /// Calculate the hash of the provided bytes.
-    pub fn new(buf: impl AsRef<[u8]>) -> Self {
-        let val = blake3::hash(buf.as_ref());
+    pub fn new<H: Hasher>(buf: impl AsRef<[u8]>) -> Self {
+        let val = H::hash_chunk(0, buf.as_ref(), true);
         Hash(val)
     }
 
@@ -40,7 +42,7 @@ impl Hash {
 
     /// Create a `Hash` from its raw bytes representation.
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(blake3::Hash::from_bytes(bytes))
+        Self(bao_tree::Hash::from_bytes(bytes))
     }
 
     /// Convert the hash to a hex string.
@@ -77,21 +79,21 @@ impl Borrow<[u8; 32]> for Hash {
     }
 }
 
-impl From<Hash> for blake3::Hash {
+impl From<Hash> for bao_tree::Hash {
     fn from(value: Hash) -> Self {
         value.0
     }
 }
 
-impl From<blake3::Hash> for Hash {
-    fn from(value: blake3::Hash) -> Self {
+impl From<bao_tree::Hash> for Hash {
+    fn from(value: bao_tree::Hash) -> Self {
         Hash(value)
     }
 }
 
 impl From<[u8; 32]> for Hash {
     fn from(value: [u8; 32]) -> Self {
-        Hash(blake3::Hash::from(value))
+        Hash(bao_tree::Hash::from(value))
     }
 }
 
@@ -103,7 +105,7 @@ impl From<Hash> for [u8; 32] {
 
 impl From<&[u8; 32]> for Hash {
     fn from(value: &[u8; 32]) -> Self {
-        Hash(blake3::Hash::from(*value))
+        Hash(bao_tree::Hash::from(*value))
     }
 }
 
@@ -168,7 +170,7 @@ impl FromStr for Hash {
             }
             Err(partial) => return Err(e!(HexOrBase32ParseError::Decode, partial.error)),
         }
-        Ok(Self(blake3::Hash::from_bytes(bytes)))
+        Ok(Self::from(bytes))
     }
 }
 
@@ -195,7 +197,7 @@ impl<'de> Deserialize<'de> for Hash {
             s.parse().map_err(de::Error::custom)
         } else {
             let data: [u8; 32] = Deserialize::deserialize(deserializer)?;
-            Ok(Self(blake3::Hash::from(data)))
+            Ok(Self::from(data))
         }
     }
 }

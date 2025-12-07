@@ -225,52 +225,18 @@ pub(crate) mod outboard_with_progress {
     use std::io::{self, BufReader, Read};
 
     use bao_tree::{
-        blake3,
         io::{
             outboard::PreOrderOutboard,
             sync::{OutboardMut, WriteAt},
         },
         iter::BaoChunk,
-        BaoTree, ChunkNum,
+        BaoTree, ChunkNum, Hasher,
     };
     use smallvec::SmallVec;
 
     use super::sink::Sink;
 
-    fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
-        use blake3::hazmat::{ChainingValue, HasherExt};
-        if is_root {
-            debug_assert!(start_chunk == 0);
-            blake3::hash(data)
-        } else {
-            let mut hasher = blake3::Hasher::new();
-            hasher.set_input_offset(start_chunk * 1024);
-            hasher.update(data);
-            let non_root_hash: ChainingValue = hasher.finalize_non_root();
-            blake3::Hash::from(non_root_hash)
-        }
-    }
-
-    fn parent_cv(
-        left_child: &blake3::Hash,
-        right_child: &blake3::Hash,
-        is_root: bool,
-    ) -> blake3::Hash {
-        use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
-        let left_child: ChainingValue = *left_child.as_bytes();
-        let right_child: ChainingValue = *right_child.as_bytes();
-        if is_root {
-            merge_subtrees_root(&left_child, &right_child, Mode::Hash)
-        } else {
-            blake3::Hash::from(merge_subtrees_non_root(
-                &left_child,
-                &right_child,
-                Mode::Hash,
-            ))
-        }
-    }
-
-    pub async fn init_outboard<R, W, P>(
+    pub async fn init_outboard<R, W, P, H>(
         data: R,
         outboard: &mut PreOrderOutboard<W>,
         progress: &mut P,
@@ -279,6 +245,7 @@ pub(crate) mod outboard_with_progress {
         W: WriteAt,
         R: Read,
         P: Sink<ChunkNum>,
+        H: Hasher,
     {
         // wrap the reader in a buffered reader, so we read in large chunks
         // this reduces the number of io ops
@@ -287,11 +254,11 @@ pub(crate) mod outboard_with_progress {
         let chunk_buf_size = size.min(outboard.tree.block_size().bytes());
         let reader = BufReader::with_capacity(read_buf_size, data);
         let mut buffer = SmallVec::<[u8; 128]>::from_elem(0u8, chunk_buf_size);
-        let res = init_impl(outboard.tree, reader, outboard, &mut buffer, progress).await?;
+        let res = init_impl::<_, _, H>(outboard.tree, reader, outboard, &mut buffer, progress).await?;
         Ok(res)
     }
 
-    async fn init_impl<W, P>(
+    async fn init_impl<W, P, H>(
         tree: BaoTree,
         mut data: impl Read,
         outboard: &mut PreOrderOutboard<W>,
@@ -301,9 +268,10 @@ pub(crate) mod outboard_with_progress {
     where
         W: WriteAt,
         P: Sink<ChunkNum>,
+        H: Hasher,
     {
         // do not allocate for small trees
-        let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+        let mut stack = SmallVec::<[bao_tree::Hash; 10]>::new();
         // debug_assert!(buffer.len() == tree.chunk_group_bytes());
         for item in tree.post_order_chunks_iter() {
             match item {
@@ -311,7 +279,7 @@ pub(crate) mod outboard_with_progress {
                     let right_hash = stack.pop().unwrap();
                     let left_hash = stack.pop().unwrap();
                     outboard.save(node, &(left_hash, right_hash))?;
-                    let parent = parent_cv(&left_hash, &right_hash, is_root);
+                    let parent = H::hash_inner(&left_hash, &right_hash, is_root);
                     stack.push(parent);
                 }
                 BaoChunk::Leaf {
@@ -325,7 +293,7 @@ pub(crate) mod outboard_with_progress {
                     }
                     let buf = &mut buffer[..size];
                     data.read_exact(buf)?;
-                    let hash = hash_subtree(start_chunk.0, buf, is_root);
+                    let hash = H::hash_chunk(start_chunk.0, buf, is_root);
                     stack.push(hash);
                 }
             }

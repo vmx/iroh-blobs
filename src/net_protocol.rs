@@ -38,8 +38,9 @@
 //! # }
 //! ```
 
-use std::{fmt::Debug, ops::Deref, sync::Arc};
+use std::{fmt::Debug, marker::PhantomData, ops::Deref, sync::Arc};
 
+use bao_tree::Hasher;
 use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
@@ -56,11 +57,12 @@ pub(crate) struct BlobsInner {
 
 /// A protocol handler for the blobs protocol.
 #[derive(Debug, Clone)]
-pub struct BlobsProtocol {
+pub struct BlobsProtocol<H> {
     inner: Arc<BlobsInner>,
+    _hasher: PhantomData::<H>,
 }
 
-impl Deref for BlobsProtocol {
+impl<H> Deref for BlobsProtocol<H> {
     type Target = Store;
 
     fn deref(&self) -> &Self::Target {
@@ -68,13 +70,14 @@ impl Deref for BlobsProtocol {
     }
 }
 
-impl BlobsProtocol {
+impl<H> BlobsProtocol<H> {
     pub fn new(store: &Store, events: Option<EventSender>) -> Self {
         Self {
             inner: Arc::new(BlobsInner {
                 store: store.clone(),
                 events: events.unwrap_or(EventSender::DEFAULT),
             }),
+            _hasher: PhantomData::<H>,
         }
     }
 
@@ -83,11 +86,11 @@ impl BlobsProtocol {
     }
 }
 
-impl ProtocolHandler for BlobsProtocol {
+impl<H: Hasher + 'static> ProtocolHandler for BlobsProtocol<H> {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
         let store = self.store().clone();
         let events = self.inner.events.clone();
-        crate::provider::handle_connection(conn, store, events).await;
+        crate::provider::handle_connection::<H>(conn, store, events).await;
         Ok(())
     }
 

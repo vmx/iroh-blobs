@@ -86,3 +86,8 @@ required-features = ["fs-store"]
 [[example]]
 name = "random_store"
 required-features = ["fs-store"]
+
+[patch.crates-io]
+#bao-tree = { git = "https://github.com/vmx/bao-tree", branch = "generic-hasher" }
+bao-tree = { path = "/home/vmx/src/rust/iroh/bao-tree" }
+

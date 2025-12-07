@@ -169,7 +169,7 @@ mod fs {
     };
 
     use arrayvec::ArrayString;
-    use bao_tree::blake3;
+    use bao_tree::{blake3, Hasher};
     use serde::{de::DeserializeOwned, Serialize};
 
     mod redb_support {
@@ -224,6 +224,7 @@ mod fs {
 
         // Compute hash over data (skip first 32 bytes)
         let data_slice = &buffer[32..];
+        // TODO vmx 2025-09-14: think about using the generic hasher.
         let hash = blake3::hash(data_slice);
         buffer[..32].copy_from_slice(hash.as_bytes());
 
@@ -324,8 +325,8 @@ mod fs {
         }
 
         #[allow(dead_code)]
-        fn hash_short(&self) -> ArrayString<10> {
-            crate::Hash::new(self.as_ref()).fmt_short()
+        fn hash_short<H: Hasher>(&self) -> ArrayString<10> {
+            crate::Hash::new::<H>(self.as_ref()).fmt_short()
         }
     }
 
@@ -334,8 +335,8 @@ mod fs {
             self.as_ref() as *const [u8] as *const u8 as usize
         }
 
-        fn hash_short(&self) -> ArrayString<10> {
-            crate::Hash::new(self.as_ref()).fmt_short()
+        fn hash_short<H: Hasher>(&self) -> ArrayString<10> {
+            crate::Hash::new::<H>(self.as_ref()).fmt_short()
         }
     }
 

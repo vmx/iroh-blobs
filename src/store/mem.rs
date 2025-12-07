@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     io::{self, Write},
+    marker::PhantomData,
     num::NonZeroU64,
     ops::Deref,
     sync::Arc,
@@ -24,7 +25,7 @@ use bao_tree::{
         sync::{Outboard, ReadAt, WriteAt},
         BaoContentItem, EncodeError, Leaf,
     },
-    BaoTree, ChunkNum, ChunkRanges, TreeNode,
+    BaoTree, ChunkNum, ChunkRanges, Hasher, TreeNode,
 };
 use bytes::Bytes;
 use irpc::channel::mpsc;
@@ -73,23 +74,24 @@ pub struct Options {
 
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct MemStore {
+pub struct MemStore<H> {
     client: ApiClient,
+    _hasher: PhantomData::<H>,
 }
 
-impl From<MemStore> for crate::api::Store {
-    fn from(value: MemStore) -> Self {
+impl<H> From<MemStore<H>> for crate::api::Store {
+    fn from(value: MemStore<H>) -> Self {
         crate::api::Store::from_sender(value.client)
     }
 }
 
-impl AsRef<crate::api::Store> for MemStore {
+impl<H> AsRef<crate::api::Store> for MemStore<H> {
     fn as_ref(&self) -> &crate::api::Store {
         crate::api::Store::ref_from_sender(&self.client)
     }
 }
 
-impl Deref for MemStore {
+impl<H> Deref for MemStore<H> {
     type Target = crate::api::Store;
 
     fn deref(&self) -> &Self::Target {
@@ -97,7 +99,7 @@ impl Deref for MemStore {
     }
 }
 
-impl Default for MemStore {
+impl<H: Hasher + 'static> Default for MemStore<H> {
     fn default() -> Self {
         Self::new()
     }
@@ -110,9 +112,12 @@ enum TaskResult {
     Scope(Scope),
 }
 
-impl MemStore {
+impl<H: Hasher + 'static> MemStore<H> {
     pub fn from_sender(client: ApiClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            _hasher: PhantomData::<H>,
+        }
     }
 
     pub fn new() -> Self {
@@ -135,7 +140,7 @@ impl MemStore {
                 protected: Default::default(),
                 idle_waiters: Default::default(),
             }
-            .run(),
+            .run::<H>(),
         );
 
         let store = Self::from_sender(sender.into());
@@ -171,7 +176,7 @@ impl Actor {
         self.tasks.spawn(fut);
     }
 
-    async fn handle_command(&mut self, cmd: Command) -> Option<ShutdownMsg> {
+    async fn handle_command<H: Hasher + 'static>(&mut self, cmd: Command) -> Option<ShutdownMsg> {
         match cmd {
             Command::ImportBao(ImportBaoMsg {
                 inner: ImportBaoRequest { hash, size },
@@ -211,13 +216,13 @@ impl Actor {
                 tx,
                 ..
             }) => {
-                self.spawn(import_bytes(data, scope, format, tx));
+                self.spawn(import_bytes::<H>(data, scope, format, tx));
             }
             Command::ImportByteStream(ImportByteStreamMsg { inner, tx, rx, .. }) => {
-                self.spawn(import_byte_stream(inner.scope, inner.format, rx, tx));
+                self.spawn(import_byte_stream::<H>(inner.scope, inner.format, rx, tx));
             }
             Command::ImportPath(cmd) => {
-                self.spawn(import_path(cmd));
+                self.spawn(import_path::<H>(cmd));
             }
             Command::ExportBao(ExportBaoMsg {
                 inner: ExportBaoRequest { hash, ranges },
@@ -225,7 +230,7 @@ impl Actor {
                 ..
             }) => {
                 let entry = self.get(&hash);
-                self.spawn(export_bao(entry, ranges, tx))
+                self.spawn(export_bao::<H>(entry, ranges, tx))
             }
             Command::ExportPath(cmd) => {
                 let entry = self.get(&cmd.hash);
@@ -491,7 +496,7 @@ impl Actor {
         }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run<H: Hasher + 'static>(mut self) {
         let shutdown = loop {
             tokio::select! {
                 cmd = self.commands.recv() => {
@@ -500,7 +505,7 @@ impl Actor {
                         // exit immediately.
                         break None;
                     };
-                    if let Some(cmd) = self.handle_command(cmd).await {
+                    if let Some(cmd) = self.handle_command::<H>(cmd).await {
                         break Some(cmd);
                     }
                 }
@@ -681,7 +686,7 @@ async fn import_bao(
 }
 
 #[instrument(skip_all, fields(hash = tracing::field::Empty))]
-async fn export_bao(
+async fn export_bao<H: Hasher>(
     entry: Option<BaoFileHandle>,
     ranges: ChunkRanges,
     mut sender: mpsc::Sender<EncodedItem>,
@@ -695,7 +700,7 @@ async fn export_bao(
     let data = entry.data_reader();
     let outboard = entry.outboard_reader();
     let tx = BaoTreeSender::new(&mut sender);
-    traverse_ranges_validated(data, outboard, &ranges, tx)
+    traverse_ranges_validated::<_, _, _, H>(data, outboard, &ranges, tx)
         .await
         .ok();
 }
@@ -705,7 +710,7 @@ async fn observe(entry: BaoFileHandle, tx: mpsc::Sender<api::blobs::Bitfield>) {
     entry.subscribe().forward(tx).await.ok();
 }
 
-async fn import_bytes(
+async fn import_bytes<H: Hasher>(
     data: Bytes,
     scope: Scope,
     format: BlobFormat,
@@ -713,7 +718,7 @@ async fn import_bytes(
 ) -> Result<ImportEntry> {
     tx.send(AddProgressItem::Size(data.len() as u64)).await?;
     tx.send(AddProgressItem::CopyDone).await?;
-    let outboard = PreOrderMemOutboard::create(&data, IROH_BLOCK_SIZE);
+    let outboard = PreOrderMemOutboard::create::<H>(&data, IROH_BLOCK_SIZE);
     Ok(ImportEntry {
         data,
         outboard,
@@ -723,7 +728,7 @@ async fn import_bytes(
     })
 }
 
-async fn import_byte_stream(
+async fn import_byte_stream<H: Hasher>(
     scope: Scope,
     format: BlobFormat,
     mut rx: mpsc::Receiver<ImportByteStreamUpdate>,
@@ -752,11 +757,11 @@ async fn import_byte_stream(
             }
         }
     }
-    import_bytes(res.into(), scope, format, tx).await
+    import_bytes::<H>(res.into(), scope, format, tx).await
 }
 
 #[cfg(wasm_browser)]
-async fn import_path(cmd: ImportPathMsg) -> Result<ImportEntry> {
+async fn import_path<H>(cmd: ImportPathMsg) -> Result<ImportEntry> {
     let _: ImportPathRequest = cmd.inner;
     Err(n0_error::anyerr!(
         "import_path is not supported in the browser"
@@ -765,7 +770,7 @@ async fn import_path(cmd: ImportPathMsg) -> Result<ImportEntry> {
 
 #[instrument(skip_all, fields(path = %cmd.path.display()))]
 #[cfg(not(wasm_browser))]
-async fn import_path(cmd: ImportPathMsg) -> Result<ImportEntry> {
+async fn import_path<H: Hasher>(cmd: ImportPathMsg) -> Result<ImportEntry> {
     use tokio::io::AsyncReadExt;
     let ImportPathMsg {
         inner:
@@ -790,7 +795,7 @@ async fn import_path(cmd: ImportPathMsg) -> Result<ImportEntry> {
         tx.send(AddProgressItem::CopyProgress(res.len() as u64))
             .await?;
     }
-    import_bytes(res.into(), scope, format, tx).await
+    import_bytes::<H>(res.into(), scope, format, tx).await
 }
 
 #[instrument(skip_all, fields(hash = %cmd.hash.fmt_short(), path = %cmd.target.display()))]
@@ -862,13 +867,13 @@ impl ReadBytesAt for DataReader {
 }
 
 pub struct OutboardReader {
-    hash: blake3::Hash,
+    hash: bao_tree::Hash,
     tree: BaoTree,
     data: BaoFileHandle,
 }
 
 impl Outboard for OutboardReader {
-    fn root(&self) -> blake3::Hash {
+    fn root(&self) -> bao_tree::Hash {
         self.hash
     }
 
@@ -876,7 +881,7 @@ impl Outboard for OutboardReader {
         self.tree
     }
 
-    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+    fn load(&self, node: TreeNode) -> io::Result<Option<(bao_tree::Hash, bao_tree::Hash)>> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(None);
         };
@@ -1004,8 +1009,8 @@ pub struct CompleteStorage {
 }
 
 impl CompleteStorage {
-    pub fn create(data: Bytes) -> (Hash, Self) {
-        let outboard = PreOrderMemOutboard::create(&data, IROH_BLOCK_SIZE);
+    pub fn create<H: Hasher>(data: Bytes) -> (Hash, Self) {
+        let outboard = PreOrderMemOutboard::create::<H>(&data, IROH_BLOCK_SIZE);
         let hash = outboard.root().into();
         let outboard = outboard.data.into();
         let entry = Self::new(data, outboard);
